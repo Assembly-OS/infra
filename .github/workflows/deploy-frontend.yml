@@ -1,0 +1,21 @@
+name: Deploy frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/frontend/**
+      - compose.yaml
+      - Caddyfile
+      - models/**
+      - scripts/**
+      - systemd/**
+      - .github/workflows/_deploy.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      service: frontend
+    secrets: inherit

@@ -1,0 +1,152 @@
+name: Deploy one service
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Compose service to deploy
+        required: true
+        type: string
+
+concurrency:
+  group: assembly-os-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.service }}
+    runs-on: ubuntu-24.04
+    environment: production
+    env:
+      SERVICE: ${{ inputs.service }}
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USERNAME: ${{ vars.VPS_USERNAME || 'root' }}
+      VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
+      DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT || '/opt/assembly-os' }}
+      GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+      BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS || '14' }}
+    steps:
+      - name: Check out the exact desired state
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify the deployment request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$SERVICE" =~ ^(backend|frontend|bot)$ ]]
+          [[ "$VPS_USERNAME" == root ]]
+          [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$VPS_SSH_PORT" =~ ^[0-9]+$ ]] && (( VPS_SSH_PORT >= 1 && VPS_SSH_PORT <= 65535 ))
+          [[ "$DEPLOY_ROOT" =~ ^/opt/[A-Za-z0-9._/-]+$ ]]
+          [[ "$GHCR_USERNAME" =~ ^[A-Za-z0-9-]+$ ]]
+          [[ "$BACKUP_RETENTION_DAYS" =~ ^[0-9]+$ ]]
+          case "$SERVICE" in
+            backend) manifest=apps/backend/image.env; key=BACKEND_IMAGE; repo=ghcr.io/assembly-os/backend ;;
+            frontend) manifest=apps/frontend/image.env; key=FRONTEND_IMAGE; repo=ghcr.io/assembly-os/frontend ;;
+            bot) manifest=apps/bot/image.env; key=BOT_IMAGE; repo=ghcr.io/assembly-os/telegrambot ;;
+          esac
+          image="$(awk -F= -v key="$key" '$1 == key {print substr($0, index($0, "=") + 1)}' "$manifest")"
+          [[ "${image%%@sha256:*}" == "$repo" ]]
+          [[ "${image#*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+      - name: Render root-readable runtime configuration
+        shell: bash
+        env:
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          BOT_NOTIFY_SECRET: ${{ secrets.BOT_NOTIFY_SECRET }}
+          DEV_PANEL_KEY: ${{ secrets.DEV_PANEL_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+          ADMIN_LOGIN: ${{ vars.ADMIN_LOGIN || 'admin' }}
+          ADMIN_IDS: ${{ vars.ADMIN_IDS }}
+          CRM_ADMIN_LOGINS: ${{ vars.CRM_ADMIN_LOGINS }}
+          NEXT_PUBLIC_TIME_ZONE: ${{ vars.NEXT_PUBLIC_TIME_ZONE || 'Asia/Tashkent' }}
+          DEV_PANEL_ENABLED: ${{ vars.DEV_PANEL_ENABLED || '0' }}
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/assembly-os-runtime"
+          python3 scripts/render-env.py --output "$runtime"
+          find "$runtime" -type f ! -perm 0600 -print -quit | grep -q . && exit 1 || true
+
+      - name: Configure pinned SSH access
+        id: ssh
+        shell: bash
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/assembly-os-deploy-key"
+          known_hosts="$RUNNER_TEMP/assembly-os-known-hosts"
+          install -m 0600 /dev/null "$key"
+          printf '%s\n' "$VPS_SSH_KEY" > "$key"
+          chmod 0600 "$key"
+          printf '%s\n' "$VPS_SSH_HOST_KEY" > "$known_hosts"
+          chmod 0600 "$known_hosts"
+          ssh-keygen -l -f "$known_hosts" >/dev/null
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "known_hosts=$known_hosts" >> "$GITHUB_OUTPUT"
+
+      - name: Stage and deploy on the VPS
+        id: remote
+        shell: bash
+        env:
+          SSH_KEY: ${{ steps.ssh.outputs.key }}
+          KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          ssh_args=(-i "$SSH_KEY" -p "$VPS_SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=15)
+          remote="$VPS_USERNAME@$VPS_HOST"
+          remote_stage="$DEPLOY_ROOT/.staging/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SERVICE}"
+          # shellcheck disable=SC2029
+          ssh "${ssh_args[@]}" "$remote" "install -d -o root -g root -m 0700 '$remote_stage/repo' '$remote_stage/config' '$remote_stage/secrets'"
+          # shellcheck disable=SC2329
+          cleanup_remote() {
+            # shellcheck disable=SC2029
+            ssh "${ssh_args[@]}" "$remote" "rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
+          }
+          trap cleanup_remote EXIT
+          rsync_ssh="ssh -i $SSH_KEY -p $VPS_SSH_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
+          rsync -az --delete -e "$rsync_ssh" \
+            compose.yaml Caddyfile apps models scripts systemd \
+            "$remote:$remote_stage/repo/"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/INFRA_COMMIT"
+          rsync -az -e "$rsync_ssh" "$RUNNER_TEMP/INFRA_COMMIT" "$remote:$remote_stage/repo/INFRA_COMMIT"
+          rsync -az --delete -e "$rsync_ssh" "$RUNNER_TEMP/assembly-os-runtime/" "$remote:$remote_stage/config/"
+          install -m 0600 /dev/null "$RUNNER_TEMP/ghcr-token"
+          printf '%s' "$GHCR_PULL_TOKEN" > "$RUNNER_TEMP/ghcr-token"
+          rsync -az -e "$rsync_ssh" "$RUNNER_TEMP/ghcr-token" "$remote:$remote_stage/secrets/ghcr-token"
+          backup_id="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          set +e
+          # shellcheck disable=SC2029
+          ssh "${ssh_args[@]}" "$remote" \
+            "bash '$remote_stage/repo/scripts/deploy.sh' '$SERVICE' '$remote_stage' '$DEPLOY_ROOT' '$GITHUB_SHA' '$run_url' '$GHCR_USERNAME' '$backup_id'"
+          deploy_status=$?
+          set -e
+          # shellcheck disable=SC2029
+          if [[ "$SERVICE" == backend ]] && ssh "${ssh_args[@]}" "$remote" "test -d '/var/backups/assembly-os/predeploy/$backup_id'"; then
+            mkdir -p "$RUNNER_TEMP/predeploy-backup"
+            rsync -az -e "$rsync_ssh" "$remote:/var/backups/assembly-os/predeploy/$backup_id/" "$RUNNER_TEMP/predeploy-backup/"
+            echo "backup=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$deploy_status"
+
+      - name: Upload the predeploy backup
+        if: ${{ always() && inputs.service == 'backend' && steps.remote.outputs.backup == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: predeploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/predeploy-backup
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(vars.BACKUP_RETENTION_DAYS || '14') }}
+          compression-level: 6

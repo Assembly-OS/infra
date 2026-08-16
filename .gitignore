@@ -1,0 +1,8 @@
+.env
+config/
+*.key
+*.pem
+known_hosts
+.staging/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,21 @@
+name: Deploy bot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/bot/**
+      - compose.yaml
+      - Caddyfile
+      - models/**
+      - scripts/**
+      - systemd/**
+      - .github/workflows/_deploy.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      service: bot
+    secrets: inherit

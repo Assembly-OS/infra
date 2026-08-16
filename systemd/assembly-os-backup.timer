@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Assembly OS backup
+
+[Timer]
+OnCalendar=*-*-* 02:35:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=assembly-os-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/backend/**
+      - compose.yaml
+      - Caddyfile
+      - models/**
+      - scripts/**
+      - systemd/**
+      - .github/workflows/_deploy.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      service: backend
+    secrets: inherit
