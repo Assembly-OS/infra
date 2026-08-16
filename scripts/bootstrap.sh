@@ -105,9 +105,12 @@ systemctl enable --now unattended-upgrades
 install -d -o root -g root -m 0755 "$deploy_root" "$deploy_root/current" "$deploy_root/releases" "$deploy_root/.staging"
 install -d -o root -g root -m 0700 /etc/assembly-os /var/backups/assembly-os
 install -d -o root -g root -m 0700 /var/backups/assembly-os/scheduled /var/backups/assembly-os/predeploy /var/backups/assembly-os/manual
-install -d -o 10001 -g 10001 -m 0750 /var/lib/assembly-os/data /var/lib/assembly-os/data/uploads
+install -d -m 0750 /var/lib/assembly-os/data /var/lib/assembly-os/data/uploads
 install -d -o root -g root -m 0755 /var/lib/assembly-os/models
-install -d -o 10001 -g 10001 -m 0750 /var/lib/assembly-os/caddy/data /var/lib/assembly-os/caddy/config
+install -d -m 0750 /var/lib/assembly-os/caddy/data /var/lib/assembly-os/caddy/config
+chown 10001:10001 \
+  /var/lib/assembly-os/data /var/lib/assembly-os/data/uploads \
+  /var/lib/assembly-os/caddy/data /var/lib/assembly-os/caddy/config
 printf '%s\n' "$deploy_root" > /etc/assembly-os/deploy-root
 chmod 0600 /etc/assembly-os/deploy-root
 printf "BACKUP_RETENTION_DAYS='%s'\n" "$backup_retention" > /etc/assembly-os/backup.env
