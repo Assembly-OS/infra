@@ -79,14 +79,11 @@ compose=(docker compose -p assembly-os
 caddy_image="$("${compose[@]}" config --images | grep '^caddy:' | head -n1)"
 [[ "$caddy_image" == caddy@sha256:* || "$caddy_image" == caddy:*@sha256:* ]] || { echo "Caddy image is not digest-pinned" >&2; exit 2; }
 docker pull "$caddy_image"
-docker run --rm --read-only --user 10001:10001 --cap-drop ALL --cap-add NET_BIND_SERVICE \
-  --security-opt no-new-privileges \
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001 \
-  --env-file /etc/assembly-os/caddy.env \
-  -v "$deploy_root/current/Caddyfile:/etc/caddy/Caddyfile:ro" \
-  -v /var/lib/assembly-os/caddy/data:/data \
-  -v /var/lib/assembly-os/caddy/config:/config \
-  "$caddy_image" caddy validate --config /etc/caddy/Caddyfile
+# Compose parses the single-quoted dotenv values before passing them to Caddy.
+# A raw `docker run --env-file` would preserve those quotes and turn a valid
+# hostname such as assemblyos.uz into the invalid certificate subject
+# 'assemblyos.uz'. `run --no-deps` keeps this an isolated validation container.
+"${compose[@]}" run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
 
 wait_healthy() {
   local target="$1" id status
