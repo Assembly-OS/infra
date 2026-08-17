@@ -34,6 +34,7 @@ def emit(path: Path, entries: dict[str, str]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--service", required=True, choices=("backend", "frontend", "bot"))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     args.output.chmod(stat.S_IRWXU)
@@ -82,7 +83,7 @@ def main() -> None:
         args.output / "bot.env",
         {
             "APP_ENV": "production",
-            "BOT_TOKEN": value("BOT_TOKEN"),
+            "BOT_TOKEN": value("BOT_TOKEN", required=args.service == "bot"),
             "BOT_NOTIFY_SECRET": notify_secret,
             "PLATFORM_DB": "/data/assambleya.db",
             "PLATFORM_URL": f"https://{domain}",

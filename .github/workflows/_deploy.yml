@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           runtime="$RUNNER_TEMP/assembly-os-runtime"
-          python3 scripts/render-env.py --output "$runtime"
+          python3 scripts/render-env.py --service "$SERVICE" --output "$runtime"
           find "$runtime" -type f ! -perm 0600 -print -quit | grep -q . && exit 1 || true
 
       - name: Configure pinned SSH access

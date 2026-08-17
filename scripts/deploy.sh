@@ -51,6 +51,11 @@ install -d -o root -g root -m 0755 "$deploy_root/current" /var/lib/assembly-os/d
 rsync -a --delete "$stage/repo/" "$deploy_root/current/"
 for env_file in backend.env frontend.env bot.env caddy.env backup.env; do
   [[ -f "$stage/config/$env_file" ]] || { echo "Missing rendered runtime configuration" >&2; exit 2; }
+  # Backend/frontend deploys can render without BOT_TOKEN. Preserve the bot's
+  # installed credentials until a bot deployment explicitly replaces them.
+  if [[ "$env_file" == bot.env && "$service" != bot && -f "/etc/assembly-os/$env_file" ]]; then
+    continue
+  fi
   install -o root -g root -m 0600 "$stage/config/$env_file" "/etc/assembly-os/$env_file"
 done
 install -o root -g root -m 0755 "$deploy_root/current/scripts/backup.sh" /usr/local/sbin/assembly-os-backup
