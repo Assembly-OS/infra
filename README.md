@@ -31,8 +31,8 @@ change the deployed artifact. No `latest` tag is produced or consumed.
    reverted.
 
 All production deploy and bootstrap runs share the non-cancelling
-`assembly-os-production` concurrency group. SQLite-affecting operations cannot
-overlap.
+`assembly-os-production` concurrency group. Database-affecting operations
+cannot overlap.
 
 ## Required GitHub configuration
 
@@ -50,6 +50,11 @@ Create a `production` environment in `Assembly-OS/infra`, restrict it to the
 - `BOT_TOKEN`: required by **Deploy bot**; backend and frontend deployments do
   not require it.
 - `BOT_NOTIFY_SECRET`: at least 32 random bytes.
+- `POSTGRES_PASSWORD`: at least 16 bytes, drawn only from `A-Za-z0-9._~-`
+  because it is carried inside `DATABASE_URL`. `npm run secret:generate`
+  produces a suitable hex value. The cluster reads it only when it initialises
+  its data directory, so changing the secret later also needs an `ALTER ROLE`
+  against the running database.
 - `ANTHROPIC_API_KEY`: optional; an empty value disables generated summaries.
 - `DEV_PANEL_KEY`: optional; set a unique value of at least 32 random bytes only
   when deliberately enabling the production dev panel.
@@ -88,9 +93,9 @@ npm run admin:hash
 unset ADMIN_PASSWORD
 ```
 
-Run the secret generator twice for independent `AUTH_SECRET` and
-`BOT_NOTIFY_SECRET` values. Store only the resulting scrypt hash, never the
-administrator plaintext password.
+Run the secret generator three times for independent `AUTH_SECRET`,
+`BOT_NOTIFY_SECRET`, and `POSTGRES_PASSWORD` values. Store only the resulting
+scrypt hash, never the administrator plaintext password.
 
 ## First server
 
@@ -125,32 +130,36 @@ automatically. DNS must already resolve to the VPS for ACME issuance.
 
 - Deployment files: `/opt/assembly-os/current`
 - Root-readable environment files: `/etc/assembly-os/*.env` (`0600`)
-- SQLite and uploads: `/var/lib/assembly-os/data`
+- PostgreSQL data directory: `/var/lib/assembly-os/pgdata` (owned by `70:70`,
+  the server account inside `postgres:17-alpine`)
+- Uploads and the bot's SQLite file: `/var/lib/assembly-os/data`
 - Whisper models: `/var/lib/assembly-os/models` (read-only in backend)
 - Caddy state: `/var/lib/assembly-os/caddy`
 - Deployment records: `/var/lib/assembly-os/deployments/<service>.json`
 - Backups: `/var/backups/assembly-os/{scheduled,predeploy,manual}`
 
-Backend is the sole schema owner. Frontend opens the existing database only and
-starts after backend is healthy. Bot uses
-`PLATFORM_DB=/data/assambleya.db`. Every service runs as UID/GID `10001`; only
-Caddy receives `NET_BIND_SERVICE`. Root filesystems are read-only, all other
-capabilities are dropped, and `no-new-privileges`, bounded logs, tmpfs scratch
-space, restart policies, and health checks are enforced.
+Postgres publishes no host port and is reachable only over the `app` network;
+backend and frontend wait for its health check before starting. Backend is the
+sole schema owner. Frontend opens the existing database only and starts after
+backend is healthy. Bot uses `PLATFORM_DB=/data/assambleya.db`. Application
+services run as UID/GID `10001` and Postgres as `70`, the account its own image
+provides; only Caddy receives `NET_BIND_SERVICE`. Root filesystems are
+read-only, all other capabilities are dropped, and `no-new-privileges`, bounded
+logs, tmpfs scratch space, restart policies, and health checks are enforced.
 
-The systemd timer uses SQLite `.backup` and archives uploads, keeping the
-configured number of daily copies. Each backend deployment also creates a
-consistent predeploy backup on the VPS and uploads it as a private GitHub Actions
-artifact. Verify a backup with `sha256sum -c SHA256SUMS`, then restore from the
-provider console or SSH:
+The systemd timer runs `pg_dump` inside the database container and archives
+uploads, keeping the configured number of daily copies. Each backend deployment
+also creates a consistent predeploy backup on the VPS and uploads it as a
+private GitHub Actions artifact. Verify a backup with `sha256sum -c
+SHA256SUMS`, then restore from the provider console or SSH:
 
 ```bash
 assembly-os-restore /var/backups/assembly-os/predeploy/<backup-id> --confirm-restore
 ```
 
 Restore first creates another manual safety backup, stops database users,
-verifies checksums, restores SQLite/uploads, fixes ownership, and starts the
-stack. Inspect desired/running state with:
+verifies checksums, replays the dump in a single transaction, restores uploads,
+fixes ownership, and starts the stack. Inspect desired/running state with:
 
 ```bash
 cat /var/lib/assembly-os/deployments/backend.json

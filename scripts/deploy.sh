@@ -48,8 +48,11 @@ available="$(df -PB1 /var/lib/docker | awk 'NR == 2 {print $4}')"
 [[ "$available" =~ ^[0-9]+$ ]] && (( available >= 2147483648 )) || { echo "At least 2 GiB of free Docker disk space is required" >&2; exit 1; }
 
 install -d -o root -g root -m 0755 "$deploy_root/current" /var/lib/assembly-os/deployments
+# Docker would create this bind mount as root:root 0755, and Postgres refuses a
+# data directory it neither owns nor keeps private.
+install -d -o 70 -g 70 -m 0700 /var/lib/assembly-os/pgdata
 rsync -a --delete "$stage/repo/" "$deploy_root/current/"
-for env_file in backend.env frontend.env bot.env caddy.env backup.env; do
+for env_file in backend.env frontend.env bot.env caddy.env postgres.env backup.env; do
   [[ -f "$stage/config/$env_file" ]] || { echo "Missing rendered runtime configuration" >&2; exit 2; }
   # Backend/frontend deploys can render without BOT_TOKEN. Preserve the bot's
   # installed credentials until a bot deployment explicitly replaces them.
@@ -101,12 +104,20 @@ wait_healthy() {
 
 # `--no-deps` is what lets this script recreate only the promoted service.
 # Preserve Compose's dependency contract explicitly before starting a consumer.
+# The database comes first because every other service consumes it, and the
+# predeploy backup below cannot run until it answers.
+"${compose[@]}" up -d postgres
+if ! wait_healthy postgres; then
+  echo "Postgres must be healthy before deploying $service" >&2
+  exit 1
+fi
+
 if [[ "$service" != backend ]] && ! wait_healthy backend; then
   echo "Backend must be healthy before deploying $service" >&2
   exit 1
 fi
 
-if [[ "$service" == backend && -f /var/lib/assembly-os/data/assambleya.db ]]; then
+if [[ "$service" == backend ]]; then
   /usr/local/sbin/assembly-os-backup predeploy "$backup_id"
 fi
 

@@ -17,15 +17,32 @@ if [[ -r /etc/assembly-os/backup.env ]]; then
 fi
 [[ "$retention" =~ ^[0-9]+$ ]] && (( retention >= 1 && retention <= 365 )) || exit 2
 
+deploy_root="$(</etc/assembly-os/deploy-root)"
+[[ "$deploy_root" == /opt/* ]] || { echo "Invalid deploy root" >&2; exit 2; }
+compose=(docker compose -p assembly-os
+  --env-file "$deploy_root/current/apps/backend/image.env"
+  --env-file "$deploy_root/current/apps/frontend/image.env"
+  --env-file "$deploy_root/current/apps/bot/image.env"
+  -f "$deploy_root/current/compose.yaml")
+
 destination="$backup_root/$kind/$backup_id"
 work="$(mktemp -d "$backup_root/.backup.XXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 install -d -m 0700 "$destination"
 
-if [[ -f "$data_root/assambleya.db" ]]; then
-  sqlite3 "$data_root/assambleya.db" ".timeout 10000" ".backup '$work/assambleya.db'"
-  sqlite3 "$work/assambleya.db" 'PRAGMA quick_check;' | grep -Fxq ok
-  install -m 0600 "$work/assambleya.db" "$destination/assambleya.db"
+# The dump runs inside the container so pg_dump always matches the server it
+# reads and the host needs no Postgres client package. An absent stack is the
+# state a missing SQLite file used to stand for: a bootstrapped server whose
+# first deployment has not landed yet, which has nothing to save.
+if [[ -f "$deploy_root/current/compose.yaml" && -n "$("${compose[@]}" ps -q postgres)" ]]; then
+  "${compose[@]}" exec -T postgres sh -c \
+    'pg_dump --clean --if-exists --no-owner --no-privileges --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"' \
+    | gzip -c > "$work/assambleya.sql.gz"
+  gzip -t "$work/assambleya.sql.gz"
+  # pg_dump writes this trailer last. A dump interrupted halfway still gzips
+  # cleanly, so the trailer is what separates a whole backup from a torso.
+  gzip -cd "$work/assambleya.sql.gz" | tail -n 5 | grep -Fq 'PostgreSQL database dump complete'
+  install -m 0600 "$work/assambleya.sql.gz" "$destination/assambleya.sql.gz"
 fi
 
 if [[ -d "$data_root/uploads" ]]; then

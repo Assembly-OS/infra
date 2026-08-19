@@ -24,9 +24,15 @@ compose=(docker compose -p assembly-os
 
 /usr/local/sbin/assembly-os-backup manual "before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
 "${compose[@]}" stop backend frontend bot
-if [[ -f "$backup_dir/assambleya.db" ]]; then
-  install -o 10001 -g 10001 -m 0600 "$backup_dir/assambleya.db" /var/lib/assembly-os/data/assambleya.db
-  rm -f /var/lib/assembly-os/data/assambleya.db-wal /var/lib/assembly-os/data/assambleya.db-shm
+# Only the readers stop; the database itself has to be up to be restored into.
+"${compose[@]}" up -d postgres
+if [[ -f "$backup_dir/assambleya.sql.gz" ]]; then
+  gzip -t "$backup_dir/assambleya.sql.gz"
+  # The dump drops what it is about to recreate, and one transaction means the
+  # database is either the backup or what it was before, never a mixture.
+  gzip -cd "$backup_dir/assambleya.sql.gz" | "${compose[@]}" exec -T postgres sh -c \
+    'psql --quiet --single-transaction --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"' \
+    >/dev/null
 fi
 if [[ -f "$backup_dir/uploads.tar.gz" ]]; then
   tar -tzf "$backup_dir/uploads.tar.gz" >/dev/null

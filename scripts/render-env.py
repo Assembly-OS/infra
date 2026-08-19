@@ -13,6 +13,15 @@ from pathlib import Path
 HASH = re.compile(r"^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$")
 DOMAIN = re.compile(r"^[A-Za-z0-9.-]+$")
 CSV_IDS = re.compile(r"^(?:[0-9]+(?:,[0-9]+)*)?$")
+# The database password is carried inside DATABASE_URL, where ':', '@' and '/'
+# would be read as URL structure instead of as characters of the password.
+# Restricting it to unreserved characters removes the need to percent-encode.
+PG_SECRET = re.compile(r"^[A-Za-z0-9._~-]+$")
+
+# The application defaults to the `assambleya` database when DATABASE_URL is
+# absent; the deployed cluster keeps that name so both agree.
+PG_USER = "assambleya"
+PG_DB = "assambleya"
 
 
 def value(name: str, *, required: bool = True) -> str:
@@ -41,6 +50,7 @@ def main() -> None:
 
     auth_secret = value("AUTH_SECRET")
     notify_secret = value("BOT_NOTIFY_SECRET")
+    postgres_password = value("POSTGRES_PASSWORD")
     admin_hash = value("ADMIN_PASSWORD_HASH")
     domain = value("APP_DOMAIN")
     admin_ids = value("ADMIN_IDS", required=False)
@@ -51,6 +61,10 @@ def main() -> None:
         raise SystemExit("AUTH_SECRET must contain at least 32 bytes")
     if len(notify_secret.encode()) < 32:
         raise SystemExit("BOT_NOTIFY_SECRET must contain at least 32 bytes")
+    if len(postgres_password.encode()) < 16:
+        raise SystemExit("POSTGRES_PASSWORD must contain at least 16 bytes")
+    if not PG_SECRET.fullmatch(postgres_password):
+        raise SystemExit("POSTGRES_PASSWORD must use only unreserved URL characters")
     if not HASH.fullmatch(admin_hash):
         raise SystemExit("ADMIN_PASSWORD_HASH is not a supported scrypt hash")
     if not DOMAIN.fullmatch(domain) or ".." in domain:
@@ -64,6 +78,7 @@ def main() -> None:
 
     common = {
         "NODE_ENV": "production",
+        "DATABASE_URL": f"postgres://{PG_USER}:{postgres_password}@postgres:5432/{PG_DB}",
         "AUTH_SECRET": auth_secret,
         "ADMIN_LOGIN": value("ADMIN_LOGIN"),
         "ADMIN_PASSWORD_HASH": admin_hash,
@@ -92,6 +107,14 @@ def main() -> None:
             "WEBAPP_HOST": "0.0.0.0",
             "WEBAPP_PORT": "8080",
             "ADMIN_IDS": admin_ids,
+        },
+    )
+    emit(
+        args.output / "postgres.env",
+        {
+            "POSTGRES_PASSWORD": postgres_password,
+            "POSTGRES_USER": PG_USER,
+            "POSTGRES_DB": PG_DB,
         },
     )
     emit(args.output / "caddy.env", {"APP_DOMAIN": domain, "ACME_EMAIL": value("ACME_EMAIL")})

@@ -17,12 +17,43 @@ x-service-defaults: &service-defaults
     - app
 
 services:
+  postgres:
+    <<: *service-defaults
+    image: postgres:17-alpine
+    # The alpine image's server account is uid/gid 70. The entrypoint would
+    # normally start as root and drop to it, but that needs CAP_SETUID, which
+    # service-defaults takes away; starting as the account directly keeps the
+    # capability set empty and still lets initdb resolve its own user.
+    user: "70:70"
+    env_file:
+      - /etc/assembly-os/postgres.env
+    volumes:
+      - /var/lib/assembly-os/pgdata:/var/lib/postgresql/data
+    tmpfs:
+      # A read-only root leaves the server nowhere to put its unix socket.
+      - /run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=70,gid=70
+    # SIGTERM means "smart shutdown" to Postgres: wait for every client to
+    # leave. Compose would kill it ten seconds later and the cluster would
+    # replay its log on the next boot. SIGINT is the fast, clean stop.
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
   backend:
     <<: *service-defaults
     image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
     user: "10001:10001"
     env_file:
       - /etc/assembly-os/backend.env
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - /var/lib/assembly-os/data:/data
       - /var/lib/assembly-os/models:/models:ro
@@ -44,6 +75,8 @@ services:
       - /etc/assembly-os/frontend.env
     depends_on:
       backend:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     volumes:
       - /var/lib/assembly-os/data:/data
