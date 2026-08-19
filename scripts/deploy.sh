@@ -52,6 +52,28 @@ install -d -o root -g root -m 0755 "$deploy_root/current" /var/lib/assembly-os/d
 # data directory it neither owns nor keeps private.
 install -d -o 70 -g 70 -m 0700 /var/lib/assembly-os/pgdata
 rsync -a --delete "$stage/repo/" "$deploy_root/current/"
+# The database password lives here and nowhere else: generated on this machine
+# the first time it is needed, never sent to GitHub, never printed by a runner.
+# The renderer leaves a placeholder behind precisely so this can be the only
+# copy. Regenerating it would lock the deployment out of its own cluster, so it
+# is written exactly once.
+pg_password_file=/etc/assembly-os/postgres-password
+if [[ ! -s "$pg_password_file" ]]; then
+  install -o root -g root -m 0600 /dev/null "$pg_password_file"
+  # Unreserved URL characters only: the password is carried inside DATABASE_URL,
+  # where ':', '@' and '/' would read as structure rather than as content.
+  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32 > "$pg_password_file"
+fi
+pg_password="$(cat "$pg_password_file")"
+[[ ${#pg_password} -ge 16 ]] || { echo "Stored database password is too short" >&2; exit 2; }
+
+for env_file in backend.env frontend.env postgres.env; do
+  [[ -f "$stage/config/$env_file" ]] || continue
+  # sed's delimiter has to be one the password cannot contain; it is
+  # alphanumeric, so '|' is safe.
+  sed -i "s|__POSTGRES_PASSWORD__|$pg_password|g" "$stage/config/$env_file"
+done
+
 for env_file in backend.env frontend.env bot.env caddy.env postgres.env backup.env; do
   [[ -f "$stage/config/$env_file" ]] || { echo "Missing rendered runtime configuration" >&2; exit 2; }
   # Backend/frontend deploys can render without BOT_TOKEN. Preserve the bot's

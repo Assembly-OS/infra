@@ -20,6 +20,10 @@ PG_SECRET = re.compile(r"^[A-Za-z0-9._~-]+$")
 
 # The application defaults to the `assambleya` database when DATABASE_URL is
 # absent; the deployed cluster keeps that name so both agree.
+# Stands in for the password until deploy.sh replaces it on the server. Chosen
+# to be obvious in a file and impossible to mistake for a real secret.
+PG_PLACEHOLDER = "__POSTGRES_PASSWORD__"
+
 PG_USER = "assambleya"
 PG_DB = "assambleya"
 
@@ -50,7 +54,12 @@ def main() -> None:
 
     auth_secret = value("AUTH_SECRET")
     notify_secret = value("BOT_NOTIFY_SECRET")
-    postgres_password = value("POSTGRES_PASSWORD")
+    # Optional on purpose. The database password is server-local state: it is
+    # generated on the box when the cluster is first initialised and never has
+    # to travel through CI, a GitHub secret, or a runner's environment. When it
+    # is absent the renderer writes a placeholder and deploy.sh substitutes the
+    # real value on arrival, so the password exists in exactly one place.
+    postgres_password = value("POSTGRES_PASSWORD", required=False) or PG_PLACEHOLDER
     admin_hash = value("ADMIN_PASSWORD_HASH")
     domain = value("APP_DOMAIN")
     admin_ids = value("ADMIN_IDS", required=False)
@@ -61,10 +70,11 @@ def main() -> None:
         raise SystemExit("AUTH_SECRET must contain at least 32 bytes")
     if len(notify_secret.encode()) < 32:
         raise SystemExit("BOT_NOTIFY_SECRET must contain at least 32 bytes")
-    if len(postgres_password.encode()) < 16:
-        raise SystemExit("POSTGRES_PASSWORD must contain at least 16 bytes")
-    if not PG_SECRET.fullmatch(postgres_password):
-        raise SystemExit("POSTGRES_PASSWORD must use only unreserved URL characters")
+    if postgres_password != PG_PLACEHOLDER:
+        if len(postgres_password.encode()) < 16:
+            raise SystemExit("POSTGRES_PASSWORD must contain at least 16 bytes")
+        if not PG_SECRET.fullmatch(postgres_password):
+            raise SystemExit("POSTGRES_PASSWORD must use only unreserved URL characters")
     if not HASH.fullmatch(admin_hash):
         raise SystemExit("ADMIN_PASSWORD_HASH is not a supported scrypt hash")
     if not DOMAIN.fullmatch(domain) or ".." in domain:

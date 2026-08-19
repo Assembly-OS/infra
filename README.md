@@ -50,11 +50,6 @@ Create a `production` environment in `Assembly-OS/infra`, restrict it to the
 - `BOT_TOKEN`: required by **Deploy bot**; backend and frontend deployments do
   not require it.
 - `BOT_NOTIFY_SECRET`: at least 32 random bytes.
-- `POSTGRES_PASSWORD`: at least 16 bytes, drawn only from `A-Za-z0-9._~-`
-  because it is carried inside `DATABASE_URL`. `npm run secret:generate`
-  produces a suitable hex value. The cluster reads it only when it initialises
-  its data directory, so changing the secret later also needs an `ALTER ROLE`
-  against the running database.
 - `ANTHROPIC_API_KEY`: optional; an empty value disables generated summaries.
 - `DEV_PANEL_KEY`: optional; set a unique value of at least 32 random bytes only
   when deliberately enabling the production dev panel.
@@ -93,9 +88,23 @@ npm run admin:hash
 unset ADMIN_PASSWORD
 ```
 
-Run the secret generator three times for independent `AUTH_SECRET`,
-`BOT_NOTIFY_SECRET`, and `POSTGRES_PASSWORD` values. Store only the resulting
-scrypt hash, never the administrator plaintext password.
+Run the secret generator twice for independent `AUTH_SECRET` and
+`BOT_NOTIFY_SECRET` values. Store only the resulting scrypt hash, never the
+administrator plaintext password.
+
+The database password is deliberately not on this list. It is generated on the
+server the first time a deployment needs it and kept in
+`/etc/assembly-os/postgres-password` (root, `0600`) — the only copy. It never
+travels through CI, never appears in a runner's environment, and is never held
+by GitHub. `render-env.py` writes a placeholder into `postgres.env`,
+`backend.env` and `frontend.env`; `deploy.sh` substitutes the real value as it
+installs them.
+
+Replacing it is therefore a deliberate act on the machine: write a new value
+into that file *and* run `ALTER ROLE assambleya WITH PASSWORD …` against the
+running cluster, which reads its own copy only when it first initialises the
+data directory. Doing one without the other locks the platform out of its
+database.
 
 ## First server
 
