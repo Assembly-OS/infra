@@ -66,7 +66,11 @@ if [[ ! -s "$pg_password_file" ]]; then
   install -o root -g root -m 0600 /dev/null "$pg_password_file"
   # Unreserved URL characters only: the password is carried inside DATABASE_URL,
   # where ':', '@' and '/' would read as structure rather than as content.
-  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32 > "$pg_password_file"
+  # Bounded read first: `tr < /dev/urandom | head` leaves tr writing into a
+  # closed pipe, and SIGPIPE under `set -o pipefail` fails the deploy with 141.
+  # head reads its 256 bytes and exits, tr sees a clean EOF, cut drains it.
+  LC_ALL=C head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' \
+    | cut -c1-32 > "$pg_password_file"
 fi
 pg_password="$(cat "$pg_password_file")"
 [[ ${#pg_password} -ge 16 ]] || { echo "Stored database password is too short" >&2; exit 2; }
