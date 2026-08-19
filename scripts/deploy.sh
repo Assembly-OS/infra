@@ -50,7 +50,11 @@ available="$(df -PB1 /var/lib/docker | awk 'NR == 2 {print $4}')"
 install -d -o root -g root -m 0755 "$deploy_root/current" /var/lib/assembly-os/deployments
 # Docker would create this bind mount as root:root 0755, and Postgres refuses a
 # data directory it neither owns nor keeps private.
-install -d -o 70 -g 70 -m 0700 /var/lib/assembly-os/pgdata
+# `install -o 70` is rejected: it wants a user *name*, and the host has no
+# account for the container's uid. chown takes the number directly.
+mkdir -p /var/lib/assembly-os/pgdata
+chown 70:70 /var/lib/assembly-os/pgdata
+chmod 0700 /var/lib/assembly-os/pgdata
 rsync -a --delete "$stage/repo/" "$deploy_root/current/"
 # The database password lives here and nowhere else: generated on this machine
 # the first time it is needed, never sent to GitHub, never printed by a runner.
