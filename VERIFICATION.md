@@ -45,3 +45,7 @@ Failed run 42291402585 stopped in Validate bootstrap settings before SSH: VPS_HO
 A paginated inspection confirmed DB_HOST, DB_PORT, DB_NAME, DB_NETWORK, INGRESS_NETWORK and DEPLOY_ENABLED match the expected configuration. VPS_USERNAME is already deploy. SSH key/host-key secrets were left unchanged. No bootstrap was rerun and no server was changed during this fix.
 
 Follow-up verification passed: 9 runtime/restore tests, actionlint with ShellCheck, the extracted bootstrap validation with valid synthetic settings, and named-error regressions for an empty VPS_HOST and an incorrect deployment account. No SSH or server operations were part of these probes.
+
+## Approved production-data restoration
+
+The separately approved final export, transfer, project-only restore and data comparison completed on 2026-11-07 at 02:08 Asia/Tashkent. All 35 tables/835 rows, 28 sequences, schema definitions, 52 uploads and the legacy SQLite file match. A fresh target backup passed validation. See CUTOVER_STATUS.md for evidence, retained recovery paths, service state and the still-pending deployment approval.

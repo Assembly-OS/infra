@@ -1,6 +1,6 @@
 # Migration runbook — approval required before production changes
 
-Prepared on 2026-11-07 (Asia/Tashkent). The owner subsequently approved committing and pushing these changes to main. Production rollout is not approved: no production services have been restarted, no migration/restore has been run, and no database/volume has been changed.
+Prepared on 2026-11-07 (Asia/Tashkent). The owner approved pushing to main and subsequently approved the maintenance window and data transfer/restore. Restoration and comparison are now complete; see [CUTOVER_STATUS.md](CUTOVER_STATUS.md). Application startup migrations, deployment, shared-edge reload, DNS and certificate issuance remain pending approval.
 
 ## Confirmed inventory
 
