@@ -1,6 +1,6 @@
 # Assembly OS on the dedicated Docker host
 
-This repository owns Assembly OS deployment only. Application repositories publish immutable GHCR digests into `apps/{backend,frontend,bot}/image.env`; this repository deploys them. All bootstrap/deploy jobs use the protected GitHub **prod** environment and the existing `assembly-os-production` concurrency group.
+This repository owns Assembly OS deployment only. Application repositories publish immutable GHCR digests into `apps/{backend,frontend,bot}/image.env`; this repository deploys them. All bootstrap/deploy jobs use the protected GitHub **production** environment and the existing `assembly-os-production` concurrency group.
 
 ## Architecture
 
@@ -16,11 +16,11 @@ Read [MIGRATION.md](MIGRATION.md) before rollout. Starting the backend **runs it
 
 ## GitHub settings
 
-The repository previously used `production`. Create **prod**, restrict it to `main`, require an approving reviewer, and migrate existing application settings to it before enabling deployment. Keep old workflows/runs from deploying during cutover. GitHub settings have not been changed by this local migration.
+Use the existing **production** environment, restrict it to `main`, and require an approving reviewer before enabling deployment. Preserve its existing application secrets and variables. Keep old workflows/runs from deploying during cutover. GitHub settings have not been changed by this local migration.
 
-Set repository-level Actions variable `DEPLOY_ENABLED=false` (or leave absent). Deployments are manual (`workflow_dispatch`) during migration; pushes run checks only. The deploy job also checks this gate before selecting its environment; this particular gate must be a **repository variable**, not a prod environment variable. Set it to `true` only after the approved restore. Environment reviewers remain required for future deployments. Pushing these changes with the gate absent/false cannot deploy application services.
+Set `DEPLOY_ENABLED=false` in the existing **production environment**. Deployments are manual (`workflow_dispatch`) during migration; pushes run checks only. The first deployment step checks the environment gate before checkout, SSH access or any production action. Set it to `true` only after the approved restore. Environment reviewers remain required for future deployments. Pushing these changes with the gate absent/false cannot deploy application services.
 
-**prod environment secrets**:
+**production environment secrets**:
 
 | Setting | Purpose |
 | --- | --- |
@@ -39,7 +39,7 @@ Set repository-level Actions variable `DEPLOY_ENABLED=false` (or leave absent). 
 
 Do not configure `POSTGRES_PASSWORD`, a cluster password, or a new database administrator credential. Password punctuation is URL-encoded for the existing `DATABASE_URL` application interface. `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are also forwarded explicitly to backend/frontend env files. Root-only `database.json` lets maintenance tools use the same application role, passing credentials through process environment rather than command arguments. Runtime files are mode 0600, configuration directories mode 0700.
 
-**prod environment variables**:
+**production environment variables**:
 
 | Setting | Value |
 | --- | --- |

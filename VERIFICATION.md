@@ -22,7 +22,7 @@ All production inspections were read-only. Preparation performed no deployment, 
 
 ## Server evidence
 
-The old backend/frontend use database `assambleya`, role `assambleya`, PostgreSQL 17.11. The owner confirmed the destination as `assembly_os_db`, role `assembly_os_user`, on the existing shared PostgreSQL 18.1 container. Metadata shows the destination is owned by that role, currently has no public tables, and the role has LOGIN without superuser/CREATEDB/CREATEROLE. Application-password authentication is still to be checked using the prod secret during approved bootstrap.
+The old backend/frontend use database `assambleya`, role `assambleya`, PostgreSQL 17.11. The owner confirmed the destination as `assembly_os_db`, role `assembly_os_user`, on the existing shared PostgreSQL 18.1 container. Metadata shows the destination is owned by that role, currently has no public tables, and the role has LOGIN without superuser/CREATEDB/CREATEROLE. Application-password authentication is still to be checked using the production secret during approved bootstrap.
 
 The new server has no existing Assembly OS Compose project or project storage. Existing shared database/ingress networks are present. Shared edge owns 80/443; the prepared app exposes no host ports and uses unique service names on external networks.
 
@@ -30,10 +30,18 @@ DNS resolves `assemblyos.uz` to the old server; public HTTPS returned 200. New-o
 
 ## Still pending approval/access
 
-- Configure the protected GitHub prod environment, its secrets/variables and repository deployment gate. GitHub CLI authentication failed; connected GitHub tools do not expose environment-secret management. No GitHub settings were written and no password was retrieved.
+- Configure the protected GitHub production environment, its secrets/variables and environment deployment gate. GitHub CLI authentication failed; connected GitHub tools do not expose environment-secret management. No GitHub settings were written and no password was retrieved.
 - Execute CI on GitHub after the separately approved main-branch push.
 - Bootstrap target project storage, final old-server write freeze/export, secure transfer, project-only restore, and comparison of real data/media/sequences.
 - Approve backend startup migrations, application deployment, shared-edge source/site reload, DNS/Cloudflare changes and certificate issuance. Keep old critical data and volumes intact.
 - End-to-end production smoke tests and actual backup/restore recovery verification. Synthetic test success does not substitute for comparing restored critical production data.
 
 See README.md for exact GitHub settings and MIGRATION.md for rollout and rollback order.
+
+## Bootstrap failure follow-up
+
+Failed run 42291402585 stopped in Validate bootstrap settings before SSH: VPS_HOST was empty. Read-only GitHub inspection confirmed `prod` contained no settings while the supplied settings were in the existing `production` environment. Both bootstrap and deploy now use `production`. The deployment-enable check runs after environment selection so the environment's DEPLOY_ENABLED is visible; push-triggered deploy remains disabled. Missing VPS_HOST or an invalid deployment account now produce named errors.
+
+A paginated inspection confirmed DB_HOST, DB_PORT, DB_NAME, DB_NETWORK, INGRESS_NETWORK and DEPLOY_ENABLED match the expected configuration. VPS_USERNAME is already deploy. SSH key/host-key secrets were left unchanged. No bootstrap was rerun and no server was changed during this fix.
+
+Follow-up verification passed: 9 runtime/restore tests, actionlint with ShellCheck, the extracted bootstrap validation with valid synthetic settings, and named-error regressions for an empty VPS_HOST and an incorrect deployment account. No SSH or server operations were part of these probes.

@@ -17,11 +17,12 @@ permissions:
 
 jobs:
   deploy:
-    if: ${{ github.event_name == 'workflow_dispatch' && vars.DEPLOY_ENABLED == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     name: Deploy ${{ inputs.service }}
     runs-on: ubuntu-24.04
-    environment: prod
+    environment: production
     env:
+      DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED || 'false' }}
       SERVICE: ${{ inputs.service }}
       VPS_HOST: ${{ secrets.VPS_HOST }}
       VPS_USERNAME: ${{ vars.VPS_USERNAME || 'deploy' }}
@@ -30,6 +31,14 @@ jobs:
       GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
       BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS || '14' }}
     steps:
+      - name: Require explicit deployment enablement
+        shell: bash
+        run: |
+          if [[ "$DEPLOY_ENABLED" != true ]]; then
+            echo "::error::Deployment is disabled. Enable DEPLOY_ENABLED in environment production only after the approved data restore."
+            exit 1
+          fi
+
       - name: Check out the exact desired state
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -39,7 +48,11 @@ jobs:
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ "$SERVICE" =~ ^(backend|frontend|bot)$ ]]
-          [[ "$VPS_USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$VPS_USERNAME" != root ]]
+          [[ "$VPS_USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$VPS_USERNAME" != root ]] || {
+            echo "::error::VPS_USERNAME must be the dedicated deploy account. Set variable VPS_USERNAME=deploy in environment production."
+            exit 1
+          }
+          [[ -n "${VPS_HOST:-}" ]] || { echo "::error::Missing secret VPS_HOST in GitHub environment production"; exit 1; }
           [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$VPS_SSH_PORT" =~ ^[0-9]+$ ]] && (( VPS_SSH_PORT >= 1 && VPS_SSH_PORT <= 65535 ))
           [[ "$DEPLOY_ROOT" == /opt/assembly-os ]]
