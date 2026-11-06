@@ -1,0 +1,44 @@
+name: Infrastructure checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Runtime and restore safety tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Synthetic PostgreSQL 17 to 18 restore
+        run: python3 tests/postgres_rehearsal.py
+      - name: ShellCheck
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -w /work koalaman/shellcheck:v0.11.0 --external-sources scripts/*.sh
+      - name: Workflow lint
+        run: docker run --rm -v "$PWD:/work:ro" -w /work rhysd/actionlint:1.7.12
+      - name: Compose validation without production env files
+        env:
+          DB_NETWORK: infrastructure_database
+          INGRESS_NETWORK: agrozanjir_web
+        run: |
+          docker compose --env-file apps/backend/image.env --env-file apps/frontend/image.env \
+            --env-file apps/bot/image.env -f compose.yaml config --no-env-resolution --quiet
+      - name: Internal and shared-edge Caddy syntax
+        run: |
+          image='caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d'
+          docker run --rm --entrypoint caddy -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" validate --config /etc/caddy/Caddyfile
+          docker run --rm --entrypoint caddy -v "$PWD/edge/site.caddy:/etc/caddy/Caddyfile:ro" "$image" adapt --validate --config /etc/caddy/Caddyfile >/dev/null
+      - name: Deployment security rules
+        run: |
+          docker run --rm -v "$PWD:/work:ro" -w /work semgrep/semgrep:1.179.0 \
+            semgrep scan --config .github/semgrep.yml --error --metrics=off --disable-version-check scripts
+      - name: Secret security scan
+        run: |
+          docker run --rm -v "$PWD:/work:ro" aquasec/trivy:0.69.3 fs --scanners secret \
+            --severity HIGH,CRITICAL --exit-code 1 --skip-dirs /work/.git /work

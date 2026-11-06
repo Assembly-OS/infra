@@ -7,25 +7,14 @@ import argparse
 import os
 import re
 import stat
+import json
+from urllib.parse import quote
 from pathlib import Path
 
 
 HASH = re.compile(r"^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$")
 DOMAIN = re.compile(r"^[A-Za-z0-9.-]+$")
 CSV_IDS = re.compile(r"^(?:[0-9]+(?:,[0-9]+)*)?$")
-# The database password is carried inside DATABASE_URL, where ':', '@' and '/'
-# would be read as URL structure instead of as characters of the password.
-# Restricting it to unreserved characters removes the need to percent-encode.
-PG_SECRET = re.compile(r"^[A-Za-z0-9._~-]+$")
-
-# The application defaults to the `assambleya` database when DATABASE_URL is
-# absent; the deployed cluster keeps that name so both agree.
-# Stands in for the password until deploy.sh replaces it on the server. Chosen
-# to be obvious in a file and impossible to mistake for a real secret.
-PG_PLACEHOLDER = "__POSTGRES_PASSWORD__"
-
-PG_USER = "assambleya"
-PG_DB = "assambleya"
 
 
 def value(name: str, *, required: bool = True) -> str:
@@ -45,6 +34,7 @@ def emit(path: Path, entries: dict[str, str]) -> None:
 
 
 def main() -> None:
+    os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--service", required=True, choices=("backend", "frontend", "bot"))
@@ -54,12 +44,21 @@ def main() -> None:
 
     auth_secret = value("AUTH_SECRET")
     notify_secret = value("BOT_NOTIFY_SECRET")
-    # Optional on purpose. The database password is server-local state: it is
-    # generated on the box when the cluster is first initialised and never has
-    # to travel through CI, a GitHub secret, or a runner's environment. When it
-    # is absent the renderer writes a placeholder and deploy.sh substitutes the
-    # real value on arrival, so the password exists in exactly one place.
-    postgres_password = value("POSTGRES_PASSWORD", required=False) or PG_PLACEHOLDER
+    db = {name: value(name) for name in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_NETWORK", "INGRESS_NETWORK")}
+    password = os.environ.get("DB_PASSWORD", "")
+    if not password or any(c in password for c in "\x00\r\n"):
+        raise SystemExit("DB_PASSWORD must be a nonempty single-line application password")
+    db["DB_PASSWORD"] = password
+    for name in ("DB_NAME", "DB_USER"):
+        if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", db[name]):
+            raise SystemExit(f"Invalid database identifier: {name}")
+    for name in ("DB_HOST", "DB_NETWORK", "INGRESS_NETWORK"):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", db[name]):
+            raise SystemExit(f"Invalid setting: {name}")
+    if not db["DB_PORT"].isdigit() or not 1 <= int(db["DB_PORT"]) <= 65535:
+        raise SystemExit("Invalid DB_PORT")
+    database_url = (f"postgres://{quote(db['DB_USER'], safe='')}:{quote(db['DB_PASSWORD'], safe='')}"
+                    f"@{db['DB_HOST']}:{db['DB_PORT']}/{db['DB_NAME']}")
     admin_hash = value("ADMIN_PASSWORD_HASH")
     domain = value("APP_DOMAIN")
     admin_ids = value("ADMIN_IDS", required=False)
@@ -70,11 +69,6 @@ def main() -> None:
         raise SystemExit("AUTH_SECRET must contain at least 32 bytes")
     if len(notify_secret.encode()) < 32:
         raise SystemExit("BOT_NOTIFY_SECRET must contain at least 32 bytes")
-    if postgres_password != PG_PLACEHOLDER:
-        if len(postgres_password.encode()) < 16:
-            raise SystemExit("POSTGRES_PASSWORD must contain at least 16 bytes")
-        if not PG_SECRET.fullmatch(postgres_password):
-            raise SystemExit("POSTGRES_PASSWORD must use only unreserved URL characters")
     if not HASH.fullmatch(admin_hash):
         raise SystemExit("ADMIN_PASSWORD_HASH is not a supported scrypt hash")
     if not DOMAIN.fullmatch(domain) or ".." in domain:
@@ -88,7 +82,8 @@ def main() -> None:
 
     common = {
         "NODE_ENV": "production",
-        "DATABASE_URL": f"postgres://{PG_USER}:{postgres_password}@postgres:5432/{PG_DB}",
+        "DATABASE_URL": database_url,
+        **{name: db[name] for name in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER")},
         "AUTH_SECRET": auth_secret,
         "ADMIN_LOGIN": value("ADMIN_LOGIN"),
         "ADMIN_PASSWORD_HASH": admin_hash,
@@ -119,14 +114,10 @@ def main() -> None:
             "ADMIN_IDS": admin_ids,
         },
     )
-    emit(
-        args.output / "postgres.env",
-        {
-            "POSTGRES_PASSWORD": postgres_password,
-            "POSTGRES_USER": PG_USER,
-            "POSTGRES_DB": PG_DB,
-        },
-    )
+    emit(args.output / "compose.env", {name: db[name] for name in ("DB_NETWORK", "INGRESS_NETWORK")})
+    config = args.output / "database.json"
+    config.write_text(json.dumps(db) + "\n", encoding="utf-8")
+    config.chmod(0o600)
     emit(args.output / "caddy.env", {"APP_DOMAIN": domain, "ACME_EMAIL": value("ACME_EMAIL")})
     retention = value("BACKUP_RETENTION_DAYS")
     if not retention.isdigit() or not 1 <= int(retention) <= 365:

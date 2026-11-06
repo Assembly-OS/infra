@@ -2,17 +2,6 @@ name: Server bootstrap
 
 on:
   workflow_dispatch:
-    inputs:
-      full_upgrade:
-        description: Run apt full-upgrade before provisioning
-        required: true
-        type: boolean
-        default: true
-      reboot_if_required:
-        description: Reboot and wait when Ubuntu requests it
-        required: true
-        type: boolean
-        default: true
 
 concurrency:
   group: assembly-os-production
@@ -23,14 +12,16 @@ permissions:
 
 jobs:
   bootstrap:
-    name: Prepare Ubuntu 26.04
+    name: Prepare project storage only
     runs-on: ubuntu-24.04
-    environment: production
+    environment: prod
     env:
       VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_USERNAME: ${{ vars.VPS_USERNAME || 'root' }}
+      VPS_USERNAME: ${{ vars.VPS_USERNAME || 'deploy' }}
       VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
       DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT || '/opt/assembly-os' }}
+      DB_NETWORK: ${{ vars.DB_NETWORK }}
+      INGRESS_NETWORK: ${{ vars.INGRESS_NETWORK }}
       BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS || '14' }}
     steps:
       - name: Check out bootstrap sources
@@ -40,10 +31,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$VPS_USERNAME" == root ]]
+          [[ "$VPS_USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$VPS_USERNAME" != root ]]
           [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$VPS_SSH_PORT" =~ ^[0-9]+$ ]] && (( VPS_SSH_PORT >= 1 && VPS_SSH_PORT <= 65535 ))
-          [[ "$DEPLOY_ROOT" =~ ^/opt/[A-Za-z0-9._/-]+$ ]]
+          [[ "$DEPLOY_ROOT" == /opt/assembly-os ]]
           [[ "$BACKUP_RETENTION_DAYS" =~ ^[0-9]+$ ]] && (( BACKUP_RETENTION_DAYS >= 1 && BACKUP_RETENTION_DAYS <= 365 ))
           awk '
             /^#/ || NF == 0 { next }
@@ -52,7 +43,36 @@ jobs:
             END { if (count != 2) exit 1 }
           ' models/checksums.tsv
 
-      - name: Configure pinned root SSH access
+      - name: Render root-readable runtime configuration
+        shell: bash
+        env:
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_PORT: ${{ vars.DB_PORT }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NETWORK: ${{ vars.DB_NETWORK }}
+          INGRESS_NETWORK: ${{ vars.INGRESS_NETWORK }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          BOT_NOTIFY_SECRET: ${{ secrets.BOT_NOTIFY_SECRET }}
+          DEV_PANEL_KEY: ${{ secrets.DEV_PANEL_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+          ADMIN_LOGIN: ${{ vars.ADMIN_LOGIN || 'admin' }}
+          ADMIN_IDS: ${{ vars.ADMIN_IDS }}
+          CRM_ADMIN_LOGINS: ${{ vars.CRM_ADMIN_LOGINS }}
+          NEXT_PUBLIC_TIME_ZONE: ${{ vars.NEXT_PUBLIC_TIME_ZONE || 'Asia/Tashkent' }}
+          DEV_PANEL_ENABLED: ${{ vars.DEV_PANEL_ENABLED || '0' }}
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/assembly-os-runtime"
+          python3 scripts/render-env.py --service backend --output "$runtime"
+          find "$runtime" -type f ! -perm 0600 -print -quit | grep -q . && exit 1 || true
+
+      - name: Configure pinned deployment SSH access
         id: ssh
         shell: bash
         env:
@@ -76,7 +96,6 @@ jobs:
         env:
           SSH_KEY: ${{ steps.ssh.outputs.key }}
           KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
-          FULL_UPGRADE: ${{ inputs.full_upgrade }}
         run: |
           set -euo pipefail
           ssh_args=(-i "$SSH_KEY" -p "$VPS_SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes
@@ -84,45 +103,18 @@ jobs:
           remote="$VPS_USERNAME@$VPS_HOST"
           remote_stage="/tmp/assembly-os-bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # shellcheck disable=SC2029
-          ssh "${ssh_args[@]}" "$remote" "test \"\$(id -u)\" = 0 && install -d -o root -g root -m 0700 '$remote_stage'"
+          ssh "${ssh_args[@]}" "$remote" "sudo -n true && install -d -m 0700 '$remote_stage'"
           cleanup_remote() {
             # shellcheck disable=SC2029
-            ssh "${ssh_args[@]}" "$remote" "rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
+            ssh "${ssh_args[@]}" "$remote" "sudo -n rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
           }
           trap cleanup_remote EXIT
           rsync_ssh="ssh -i $SSH_KEY -p $VPS_SSH_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
           rsync -az -e "$rsync_ssh" models scripts systemd "$remote:$remote_stage/"
+          rsync -az -e "$rsync_ssh" "$RUNNER_TEMP/assembly-os-runtime/" "$remote:$remote_stage/config/"
           # shellcheck disable=SC2029
           ssh "${ssh_args[@]}" "$remote" \
-            "bash '$remote_stage/scripts/bootstrap.sh' '$DEPLOY_ROOT' '$VPS_SSH_PORT' '$FULL_UPGRADE' '$remote_stage' '$BACKUP_RETENTION_DAYS'"
-          if ssh "${ssh_args[@]}" "$remote" "test -f /var/run/reboot-required"; then
-            echo "reboot=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "reboot=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Reboot the VPS
-        if: inputs.reboot_if_required && steps.provision.outputs.reboot == 'true'
-        shell: bash
-        env:
-          SSH_KEY: ${{ steps.ssh.outputs.key }}
-          KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
-        run: |
-          set -euo pipefail
-          ssh_args=(-i "$SSH_KEY" -p "$VPS_SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes
-            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -o ConnectTimeout=10)
-          remote="$VPS_USERNAME@$VPS_HOST"
-          ssh "${ssh_args[@]}" "$remote" "nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 &" || true
-          sleep 15
-          recovered=false
-          for _ in $(seq 1 48); do
-            if ssh "${ssh_args[@]}" "$remote" "systemctl is-system-running --wait >/dev/null 2>&1 || true; docker info >/dev/null"; then
-              recovered=true
-              break
-            fi
-            sleep 10
-          done
-          [[ "$recovered" == true ]] || { echo "The VPS did not recover after reboot" >&2; exit 1; }
+            "sudo -n bash '$remote_stage/scripts/bootstrap.sh' '$DEPLOY_ROOT' '$VPS_SSH_PORT' false '$remote_stage' '$BACKUP_RETENTION_DAYS' '$VPS_USERNAME'"
 
       - name: Verify the deployable host
         shell: bash
@@ -134,4 +126,4 @@ jobs:
           ssh -i "$SSH_KEY" -p "$VPS_SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" \
             "$VPS_USERNAME@$VPS_HOST" \
-            "test \"\$(. /etc/os-release; echo \"\$VERSION_ID\")\" = 26.04 && test \"\$(dpkg --print-architecture)\" = amd64 && docker info >/dev/null && docker compose version >/dev/null && systemctl is-active --quiet assembly-os-backup.timer && test -d '$DEPLOY_ROOT/.staging'"
+            "sudo -n docker info >/dev/null && sudo -n docker compose version >/dev/null && test -d '$DEPLOY_ROOT/.staging'"

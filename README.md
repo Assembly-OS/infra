@@ -1,184 +1,90 @@
-# Assembly OS production infrastructure
+# Assembly OS on the dedicated Docker host
 
-This repository is the only component allowed to mutate production. The three
-application repositories publish immutable GHCR images and promote a digest by
-changing exactly one file:
+This repository owns Assembly OS deployment only. Application repositories publish immutable GHCR digests into `apps/{backend,frontend,bot}/image.env`; this repository deploys them. All bootstrap/deploy jobs use the protected GitHub **prod** environment and the existing `assembly-os-production` concurrency group.
 
-| Application | Desired-state file | Immutable version |
-| --- | --- | --- |
-| Backend | `apps/backend/image.env` | `backend-<40-character commit SHA>` |
-| Frontend | `apps/frontend/image.env` | `frontend-<40-character commit SHA>` |
-| Telegram bot | `apps/bot/image.env` | `bot-<40-character commit SHA>` |
+## Architecture
 
-The readable tag is retained as deployment metadata. Compose always consumes
-`ghcr.io/assembly-os/<image>@sha256:<digest>`, so a tag can never silently
-change the deployed artifact. No `latest` tag is produced or consumed.
+- Host: `deploy@65.108.142.153`, passwordless sudo for project operations.
+- Compose project: `assembly-os`; private network `assembly-os_app`.
+- `assembly-os-backend` and `assembly-os-frontend` join existing external `infrastructure_database`. Both applications read PostgreSQL; both need database connectivity. Generic `backend`/`frontend` aliases exist only on the private project network.
+- Existing PostgreSQL: `infrastructure-postgres-postgres-1`, DNS `postgres:5432`. No PostgreSQL service, cluster initialization, role creation, administrator password, PostgreSQL volume or host port is managed here.
+- Preserve the Telegram bot and `/data/assambleya.db` legacy store, plus `/data/uploads`. There is no Redis service in this project to migrate.
+- `assembly-os-proxy` preserves the project Caddy routing on internal port 8080, joins existing `agrozanjir_web`, and publishes no host ports. Only the existing `agrozanjir-caddy-1` owns 80/443 and certificates. Its Assembly site is prepared in `edge/site.caddy`; applying it requires separate approval. It overwrites a project client-IP header, which the internal proxy forwards for application rate limiting.
+- Project paths: `/opt/assembly-os`, `/etc/assembly-os`, `/var/lib/assembly-os`, `/var/backups/assembly-os`. Numeric data owner is UID/GID 10001; no shared host group/account changes.
 
-## Delivery flow
+Read [MIGRATION.md](MIGRATION.md) before rollout. Starting the backend **runs its existing schema migration and legacy-import startup hook**. Do not start it before restoration, verification, and explicit approval.
 
-1. An application pull request audits locked production dependencies and
-   validates its production Docker build.
-2. A push to `main` reuses an existing commit tag or builds `linux/amd64`,
-   publishes SBOM and provenance, scans the digest with Trivy, and fails on any
-   actionable high or critical finding. Advisories without a vendor fix are
-   excluded from the blocking result so they cannot deadlock promotion; pinned
-   base-image updates remain automated through Dependabot.
-3. That application commits only its `image.env` to this repository.
-4. The matching path-filtered workflow connects to the VPS using a pinned host
-   key, pulls the digest, recreates only that service, and waits for health.
-5. A failed health check restores the previously running image. The failed
-   desired digest remains in Git so the drift is visible until fixed or
-   reverted.
+## GitHub settings
 
-All production deploy and bootstrap runs share the non-cancelling
-`assembly-os-production` concurrency group. Database-affecting operations
-cannot overlap.
+The repository previously used `production`. Create **prod**, restrict it to `main`, require an approving reviewer, and migrate existing application settings to it before enabling deployment. Keep old workflows/runs from deploying during cutover. GitHub settings have not been changed by this local migration.
 
-## Required GitHub configuration
+Set repository-level Actions variable `DEPLOY_ENABLED=false` (or leave absent). Deployments are manual (`workflow_dispatch`) during migration; pushes run checks only. The deploy job also checks this gate before selecting its environment; this particular gate must be a **repository variable**, not a prod environment variable. Set it to `true` only after the approved restore. Environment reviewers remain required for future deployments. Pushing these changes with the gate absent/false cannot deploy application services.
 
-Create a `production` environment in `Assembly-OS/infra`, restrict it to the
-`main` branch, and add these environment secrets:
+**prod environment secrets**:
 
-- `VPS_SSH_KEY`: dedicated private key for root on the VPS.
-- `VPS_HOST`: IPv4 address or SSH hostname.
-- `VPS_SSH_HOST_KEY`: the complete `known_hosts` entry. Confirm its fingerprint
-  in the provider console before saving it.
-- `GHCR_PULL_TOKEN`: classic PAT with only `read:packages`, SSO-authorized for
-  `Assembly-OS`.
-- `AUTH_SECRET`: at least 32 random bytes.
-- `ADMIN_PASSWORD_HASH`: the scrypt value generated by the backend helper.
-- `BOT_TOKEN`: required by **Deploy bot**; backend and frontend deployments do
-  not require it.
-- `BOT_NOTIFY_SECRET`: at least 32 random bytes.
-- `ANTHROPIC_API_KEY`: optional; an empty value disables generated summaries.
-- `DEV_PANEL_KEY`: optional; set a unique value of at least 32 random bytes only
-  when deliberately enabling the production dev panel.
-
-Add these environment variables:
-
-| Name | Value/example |
+| Setting | Purpose |
 | --- | --- |
-| `VPS_USERNAME` | `root` |
+| `DB_USER` | `assembly_os_user`, the confirmed pre-created application role |
+| `DB_PASSWORD` | That role's existing application password; never the PostgreSQL administrator password |
+| `VPS_HOST` | `65.108.142.153` (existing variable name retained) |
+| `VPS_SSH_KEY` | Dedicated deploy SSH private key; do not paste it into logs |
+| `VPS_SSH_HOST_KEY` | Complete pinned known_hosts entry, fingerprint independently verified |
+| `GHCR_PULL_TOKEN` | Read-only GHCR access |
+| `AUTH_SECRET` | Preserve existing value, at least 32 bytes |
+| `ADMIN_PASSWORD_HASH` | Preserve existing scrypt hash |
+| `BOT_NOTIFY_SECRET` | Preserve existing value, at least 32 bytes |
+| `BOT_TOKEN` | Preserve existing token; required for bot deployment |
+| `ANTHROPIC_API_KEY` | Existing optional application credential |
+| `DEV_PANEL_KEY` | Only if deliberately enabling the dev panel |
+
+Do not configure `POSTGRES_PASSWORD`, a cluster password, or a new database administrator credential. Password punctuation is URL-encoded for the existing `DATABASE_URL` application interface. `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` are also forwarded explicitly to backend/frontend env files. Root-only `database.json` lets maintenance tools use the same application role, passing credentials through process environment rather than command arguments. Runtime files are mode 0600, configuration directories mode 0700.
+
+**prod environment variables**:
+
+| Setting | Value |
+| --- | --- |
+| `DB_HOST` | `postgres` |
+| `DB_PORT` | `5432` |
+| `DB_NAME` | `assembly_os_db` (confirmed existing project database) |
+| `DB_NETWORK` | `infrastructure_database` |
+| `INGRESS_NETWORK` | `agrozanjir_web` |
+| `VPS_USERNAME` | `deploy` |
 | `VPS_SSH_PORT` | `22` |
-| `APP_DOMAIN` | production DNS name, without scheme |
-| `ACME_EMAIL` | certificate contact email |
-| `GHCR_USERNAME` | owner of `GHCR_PULL_TOKEN` |
-| `ADMIN_LOGIN` | `admin` |
-| `ADMIN_IDS` | comma-separated numeric Telegram user IDs |
-| `CRM_ADMIN_LOGINS` | comma-separated platform logins |
-| `NEXT_PUBLIC_TIME_ZONE` | `Asia/Tashkent` |
 | `DEPLOY_ROOT` | `/opt/assembly-os` |
+| `APP_DOMAIN` | `assemblyos.uz` |
+| `ACME_EMAIL` | Existing certificate contact, used when reviewing shared-edge issuance |
+| `GHCR_USERNAME` | Owner of the pull token |
 | `BACKUP_RETENTION_DAYS` | `14` |
-| `DEV_PANEL_ENABLED` | `0`; set to `1` only with `DEV_PANEL_KEY` configured |
+| `ADMIN_LOGIN` | Preserve existing value |
+| `ADMIN_IDS` | Preserve Telegram administrator IDs |
+| `CRM_ADMIN_LOGINS` | Preserve existing value |
+| `NEXT_PUBLIC_TIME_ZONE` | `Asia/Tashkent` |
+| `DEV_PANEL_ENABLED` | `0` unless explicitly required |
 
-In each application repository, add `INFRA_REPO_TOKEN`. Use one organization
-Actions secret shared only with `backend`, `frontend`, and `telegrambot`. It
-should be a fine-grained PAT owned by a dedicated automation account, scoped to
-only `Assembly-OS/infra` with `Contents: Read and write`. Do not grant Actions,
-Workflows, Administration, or package permissions; set an expiry and rotation
-reminder. Each application workflow otherwise uses only its built-in token with
-`contents: read`, `packages: write`, `attestations: write`, and `id-token: write`.
+All three deploy entry points inherit secrets into `_deploy.yml`; it renders the same DB/network configuration for every service deployment. Bootstrap renders the same settings so the database can be restored before the first application start. Application build workflows do not connect to the database and do not need database credentials. Their existing `INFRA_REPO_TOKEN`, digest promotion, SBOM/provenance and image security checks remain unchanged.
 
-Generate secret material locally in the backend repository:
+## Bootstrap and maintenance
 
-```bash
-npm run secret:generate
-read -rsp 'Admin password: ' ADMIN_PASSWORD && export ADMIN_PASSWORD && echo
-npm run admin:hash
-unset ADMIN_PASSWORD
+`Server bootstrap` prepares project directories, runtime files, model downloads with SHA-256 verification, and the project's backup scripts/systemd units. It checks existing Docker/Compose and application-role connectivity. It does **not** install packages, upgrade APT, reboot, configure Docker, restart Docker/PostgreSQL, alter firewall/network/SSH/fail2ban, create accounts, or provision any database. Missing prerequisites are reported for the host operator to resolve separately.
+
+The backup timer is enabled only after `/var/lib/assembly-os/restore-verified` exists. Bootstrap and deployment never create that marker. An operator creates this JSON attestation after comparing restored data and approving startup (format in MIGRATION.md); deployment rejects a different database/role. Deployment fails closed without it.
+
+`assembly-os-backup scheduled|predeploy|manual ID` saves only the configured application database, uploads, and a consistent SQLite legacy copy, with checksums and identity metadata. The PostgreSQL client runs inside the existing shared database container using TCP and the application role; no server service is started. Scheduled backups are online database snapshots; database/media cross-consistency requires a write freeze for the final cutover export. Only scheduled backups expire automatically. Manual/cutover and predeploy snapshots are retained until an operator archives them. Critical data backups are no longer uploaded to GitHub Actions artifacts.
+
+`assembly-os-restore BACKUP_DIR DB_NAME --confirm-project-restore` requires all project writers and the project backup timer already stopped, validates checksums and media paths before restoring, takes a target backup first, and restores in one PostgreSQL transaction using the application role. It does not stop/start any services. Old uploads/legacy SQLite are renamed alongside the restored data, not deleted. Archive links, devices and traversal paths are rejected. It never restores a cluster, users, another database, Docker volumes or PostgreSQL files. If restoration fails, keep writers stopped and recover explicitly; image rollback cannot undo schema/data changes.
+
+For the first cutover, use `scripts/export-old.sh` on the old host after the approved write freeze. It produces the same custom-archive format expected by the new restore script. Historical `assambleya.sql.gz` backups remain untouched but require a separately reviewed conversion/recovery procedure; they are not accepted by this new restore helper.
+
+## Local checks
+
+```sh
+python -m unittest discover -s tests -v
+python tests/postgres_rehearsal.py   # synthetic data, LOCAL Docker only, PostgreSQL 17 -> 18
+shellcheck --external-sources scripts/*.sh
+actionlint
+DB_NETWORK=infrastructure_database INGRESS_NETWORK=agrozanjir_web \
+  docker compose --env-file apps/backend/image.env --env-file apps/frontend/image.env \
+  --env-file apps/bot/image.env -f compose.yaml config --no-env-resolution --quiet
 ```
 
-Run the secret generator twice for independent `AUTH_SECRET` and
-`BOT_NOTIFY_SECRET` values. Store only the resulting scrypt hash, never the
-administrator plaintext password.
-
-The database password is deliberately not on this list. It is generated on the
-server the first time a deployment needs it and kept in
-`/etc/assembly-os/postgres-password` (root, `0600`) — the only copy. It never
-travels through CI, never appears in a runner's environment, and is never held
-by GitHub. `render-env.py` writes a placeholder into `postgres.env`,
-`backend.env` and `frontend.env`; `deploy.sh` substitutes the real value as it
-installs them.
-
-Replacing it is therefore a deliberate act on the machine: write a new value
-into that file *and* run `ALTER ROLE assambleya WITH PASSWORD …` against the
-running cluster, which reads its own copy only when it first initialises the
-data directory. Doing one without the other locks the platform out of its
-database.
-
-## First server
-
-The bootstrap workflow deliberately supports only Ubuntu 26.04 (Resolute),
-amd64. Before dispatching it:
-
-1. Create the VPS with root public-key authentication and verify the SSH host
-   fingerprint through the provider console.
-2. Point the domain A record (and AAAA only when IPv6 is configured) at the VPS.
-3. Make TCP 80/443, UDP 443, and the configured SSH port reachable.
-4. Configure the `production` environment above.
-5. Dispatch **Server bootstrap**. Running it again is supported and makes no
-   destructive data changes.
-
-Bootstrap installs Docker Engine from Docker's Ubuntu apt repository, Buildx,
-Compose v2, rsync, SQLite, fail2ban, UFW, and unattended security updates. It
-enforces key-only root SSH (`PermitRootLogin prohibit-password`), configures
-bounded Docker logs, creates the production directories, downloads both model
-files from commit-pinned URLs with committed SHA-256 verification, and enables
-the daily backup timer. If requested, it reboots and waits for SSH and Docker to
-recover.
-
-The model download is approximately 1.5 GB, so the first bootstrap can take a
-while. Repeated runs retain verified files.
-
-After bootstrap, merge/promote each application's `main` branch. Placeholder
-all-zero manifests are intentionally skipped until their first real promotion.
-Caddy is the only service exposing host ports and obtains/renews HTTPS
-automatically. DNS must already resolve to the VPS for ACME issuance.
-
-## Runtime layout and operations
-
-- Deployment files: `/opt/assembly-os/current`
-- Root-readable environment files: `/etc/assembly-os/*.env` (`0600`)
-- PostgreSQL data directory: `/var/lib/assembly-os/pgdata` (owned by `70:70`,
-  the server account inside `postgres:17-alpine`)
-- Uploads and the bot's SQLite file: `/var/lib/assembly-os/data`
-- Whisper models: `/var/lib/assembly-os/models` (read-only in backend)
-- Caddy state: `/var/lib/assembly-os/caddy`
-- Deployment records: `/var/lib/assembly-os/deployments/<service>.json`
-- Backups: `/var/backups/assembly-os/{scheduled,predeploy,manual}`
-
-Postgres publishes no host port and is reachable only over the `app` network;
-backend and frontend wait for its health check before starting. Backend is the
-sole schema owner. Frontend opens the existing database only and starts after
-backend is healthy. Bot uses `PLATFORM_DB=/data/assambleya.db`. Application
-services run as UID/GID `10001` and Postgres as `70`, the account its own image
-provides; only Caddy receives `NET_BIND_SERVICE`. Root filesystems are
-read-only, all other capabilities are dropped, and `no-new-privileges`, bounded
-logs, tmpfs scratch space, restart policies, and health checks are enforced.
-
-The systemd timer runs `pg_dump` inside the database container and archives
-uploads, keeping the configured number of daily copies. Each backend deployment
-also creates a consistent predeploy backup on the VPS and uploads it as a
-private GitHub Actions artifact. Verify a backup with `sha256sum -c
-SHA256SUMS`, then restore from the provider console or SSH:
-
-```bash
-assembly-os-restore /var/backups/assembly-os/predeploy/<backup-id> --confirm-restore
-```
-
-Restore first creates another manual safety backup, stops database users,
-verifies checksums, replays the dump in a single transaction, restores uploads,
-fixes ownership, and starts the stack. Inspect desired/running state with:
-
-```bash
-cat /var/lib/assembly-os/deployments/backend.json
-docker inspect --format '{{.Config.Image}}' "$(docker compose -p assembly-os \
-  --env-file /opt/assembly-os/current/apps/backend/image.env \
-  --env-file /opt/assembly-os/current/apps/frontend/image.env \
-  --env-file /opt/assembly-os/current/apps/bot/image.env \
-  -f /opt/assembly-os/current/compose.yaml ps -q backend)"
-systemctl list-timers assembly-os-backup.timer
-```
-
-Do not edit `/etc/assembly-os` by hand. Correct GitHub environment settings and
-redeploy so the rendered configuration remains reproducible.
+`checks.yml` runs the safety tests, isolated database rehearsal, ShellCheck, workflow lint, Compose/Caddy validation and Semgrep deployment rules and Trivy secret scanning. Actual shared-role authentication, production restoration, backend startup migrations, shared-edge reload and certificate issuance are rollout checks requiring approval. See [VERIFICATION.md](VERIFICATION.md) for executed checks and limitations.

@@ -3,6 +3,11 @@ set -Eeuo pipefail
 umask 077
 
 service="${1:-}"
+case "$service" in
+  backend|frontend) compose_service="assembly-os-$service" ;;
+  bot) compose_service=bot ;;
+  *) echo "Unknown service" >&2; exit 2 ;;
+esac
 stage="${2:-}"
 deploy_root="${3:-}"
 infra_commit="${4:-}"
@@ -10,8 +15,7 @@ workflow_run="${5:-}"
 ghcr_username="${6:-}"
 backup_id="${7:-}"
 
-case "$service" in backend|frontend|bot) ;; *) echo "Unknown service" >&2; exit 2 ;; esac
-[[ "$deploy_root" == /opt/* && "$deploy_root" != /opt ]] || { echo "Invalid deploy root" >&2; exit 2; }
+[[ "$deploy_root" == /opt/assembly-os ]] || { echo "Invalid deploy root" >&2; exit 2; }
 [[ "$stage" == "$deploy_root"/.staging/* && -d "$stage/repo" && -d "$stage/config" ]] || { echo "Invalid deployment stage" >&2; exit 2; }
 cleanup() {
   [[ -z "${docker_config:-}" ]] || rm -rf -- "$docker_config"
@@ -45,44 +49,13 @@ if [[ "$image" == *@sha256:00000000000000000000000000000000000000000000000000000
 fi
 
 available="$(df -PB1 /var/lib/docker | awk 'NR == 2 {print $4}')"
-[[ "$available" =~ ^[0-9]+$ ]] && (( available >= 2147483648 )) || { echo "At least 2 GiB of free Docker disk space is required" >&2; exit 1; }
+if ! [[ "$available" =~ ^[0-9]+$ ]] || (( available < 2147483648 )); then echo "At least 2 GiB of free Docker disk space is required" >&2; exit 1; fi
 
+[[ -f /var/lib/assembly-os/restore-verified ]] || { echo "Data restore must be approved and verified first" >&2; exit 1; }
+python3 "$stage/repo/scripts/project-db.py" check --require-restored --config "$stage/config/database.json"
 install -d -o root -g root -m 0755 "$deploy_root/current" /var/lib/assembly-os/deployments
-# Docker would create this bind mount as root:root 0755, and Postgres refuses a
-# data directory it neither owns nor keeps private.
-# `install -o 70` is rejected: it wants a user *name*, and the host has no
-# account for the container's uid. chown takes the number directly.
-mkdir -p /var/lib/assembly-os/pgdata
-chown 70:70 /var/lib/assembly-os/pgdata
-chmod 0700 /var/lib/assembly-os/pgdata
 rsync -a --delete "$stage/repo/" "$deploy_root/current/"
-# The database password lives here and nowhere else: generated on this machine
-# the first time it is needed, never sent to GitHub, never printed by a runner.
-# The renderer leaves a placeholder behind precisely so this can be the only
-# copy. Regenerating it would lock the deployment out of its own cluster, so it
-# is written exactly once.
-pg_password_file=/etc/assembly-os/postgres-password
-if [[ ! -s "$pg_password_file" ]]; then
-  install -o root -g root -m 0600 /dev/null "$pg_password_file"
-  # Unreserved URL characters only: the password is carried inside DATABASE_URL,
-  # where ':', '@' and '/' would read as structure rather than as content.
-  # Bounded read first: `tr < /dev/urandom | head` leaves tr writing into a
-  # closed pipe, and SIGPIPE under `set -o pipefail` fails the deploy with 141.
-  # head reads its 256 bytes and exits, tr sees a clean EOF, cut drains it.
-  LC_ALL=C head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' \
-    | cut -c1-32 > "$pg_password_file"
-fi
-pg_password="$(cat "$pg_password_file")"
-[[ ${#pg_password} -ge 16 ]] || { echo "Stored database password is too short" >&2; exit 2; }
-
-for env_file in backend.env frontend.env postgres.env; do
-  [[ -f "$stage/config/$env_file" ]] || continue
-  # sed's delimiter has to be one the password cannot contain; it is
-  # alphanumeric, so '|' is safe.
-  sed -i "s|__POSTGRES_PASSWORD__|$pg_password|g" "$stage/config/$env_file"
-done
-
-for env_file in backend.env frontend.env bot.env caddy.env postgres.env backup.env; do
+for env_file in backend.env frontend.env bot.env caddy.env backup.env compose.env database.json; do
   [[ -f "$stage/config/$env_file" ]] || { echo "Missing rendered runtime configuration" >&2; exit 2; }
   # Backend/frontend deploys can render without BOT_TOKEN. Preserve the bot's
   # installed credentials until a bot deployment explicitly replaces them.
@@ -91,7 +64,9 @@ for env_file in backend.env frontend.env bot.env caddy.env postgres.env backup.e
   fi
   install -o root -g root -m 0600 "$stage/config/$env_file" "/etc/assembly-os/$env_file"
 done
+install -o root -g root -m 0755 "$deploy_root/current/scripts/project-db.py" /usr/local/sbin/assembly-os-project-db
 install -o root -g root -m 0755 "$deploy_root/current/scripts/backup.sh" /usr/local/sbin/assembly-os-backup
+install -o root -g root -m 0755 "$deploy_root/current/scripts/restore-media.py" /usr/local/sbin/assembly-os-restore-media
 install -o root -g root -m 0755 "$deploy_root/current/scripts/restore.sh" /usr/local/sbin/assembly-os-restore
 install -o root -g root -m 0644 "$deploy_root/current/systemd/assembly-os-backup.service" /etc/systemd/system/assembly-os-backup.service
 install -o root -g root -m 0644 "$deploy_root/current/systemd/assembly-os-backup.timer" /etc/systemd/system/assembly-os-backup.timer
@@ -103,6 +78,7 @@ export DOCKER_CONFIG="$docker_config"
 docker login ghcr.io --username "$ghcr_username" --password-stdin < "$stage/secrets/ghcr-token"
 
 compose=(docker compose -p assembly-os
+  --env-file /etc/assembly-os/compose.env
   --env-file "$deploy_root/current/apps/backend/image.env"
   --env-file "$deploy_root/current/apps/frontend/image.env"
   --env-file "$deploy_root/current/apps/bot/image.env"
@@ -112,15 +88,13 @@ compose=(docker compose -p assembly-os
 caddy_image="$("${compose[@]}" config --images | grep '^caddy:' | head -n1)"
 [[ "$caddy_image" == caddy@sha256:* || "$caddy_image" == caddy:*@sha256:* ]] || { echo "Caddy image is not digest-pinned" >&2; exit 2; }
 docker pull "$caddy_image"
-# Compose parses the single-quoted dotenv values before passing them to Caddy.
-# A raw `docker run --env-file` would preserve those quotes and turn a valid
-# hostname such as assemblyos.uz into the invalid certificate subject
-# 'assemblyos.uz'. `run --no-deps` keeps this an isolated validation container.
-"${compose[@]}" run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
+# Validate in a one-shot container with no published ports and no dependent services.
+"${compose[@]}" run --rm --no-deps assembly-os-proxy caddy validate --config /etc/caddy/Caddyfile
 
 wait_healthy() {
   local target="$1" id status
   for _ in $(seq 1 36); do
+    case "$target" in backend|frontend) target="assembly-os-$target" ;; esac
     id="$("${compose[@]}" ps -q "$target")"
     if [[ -n "$id" ]]; then
       status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id")"
@@ -134,14 +108,6 @@ wait_healthy() {
 
 # `--no-deps` is what lets this script recreate only the promoted service.
 # Preserve Compose's dependency contract explicitly before starting a consumer.
-# The database comes first because every other service consumes it, and the
-# predeploy backup below cannot run until it answers.
-"${compose[@]}" up -d postgres
-if ! wait_healthy postgres; then
-  echo "Postgres must be healthy before deploying $service" >&2
-  exit 1
-fi
-
 if [[ "$service" != backend ]] && ! wait_healthy backend; then
   echo "Backend must be healthy before deploying $service" >&2
   exit 1
@@ -151,35 +117,35 @@ if [[ "$service" == backend ]]; then
   /usr/local/sbin/assembly-os-backup predeploy "$backup_id"
 fi
 
-container_id="$("${compose[@]}" ps -q "$service")"
+container_id="$("${compose[@]}" ps -q "$compose_service")"
 old_image=""
 if [[ -n "$container_id" ]]; then
   old_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
 fi
 
 docker pull "$image"
-"${compose[@]}" up -d --no-deps --force-recreate "$service"
+"${compose[@]}" up -d --no-deps --force-recreate "$compose_service"
 
 if ! wait_healthy "$service"; then
   echo "$service failed its health check; rolling back" >&2
   if [[ -n "$old_image" ]]; then
-    printf 'services:\n  %s:\n    image: %s\n' "$service" "$old_image" > "$override"
+    printf 'services:\n  %s:\n    image: %s\n' "$compose_service" "$old_image" > "$override"
     rollback=("${compose[@]}" -f "$override")
-    "${rollback[@]}" up -d --no-deps --force-recreate "$service"
+    "${rollback[@]}" up -d --no-deps --force-recreate "$compose_service"
     wait_healthy "$service" || echo "The rollback image also failed its health check" >&2
   else
-    "${compose[@]}" rm -sf "$service"
+    "${compose[@]}" rm -sf "$compose_service"
   fi
   exit 1
 fi
 
-running_id="$("${compose[@]}" ps -q "$service")"
+running_id="$("${compose[@]}" ps -q "$compose_service")"
 running_image="$(docker inspect --format '{{.Config.Image}}' "$running_id")"
 [[ "$running_image" == "$image" ]] || { echo "Running image does not match desired digest" >&2; exit 1; }
 
-"${compose[@]}" up -d --no-deps caddy
-wait_healthy caddy || { echo "Caddy failed its health check" >&2; exit 1; }
-"${compose[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+"${compose[@]}" up -d --no-deps assembly-os-proxy
+wait_healthy assembly-os-proxy || { echo "Caddy failed its health check" >&2; exit 1; }
+"${compose[@]}" exec -T assembly-os-proxy caddy reload --config /etc/caddy/Caddyfile
 
 timestamp="$(date -u +%FT%TZ)"
 record="/var/lib/assembly-os/deployments/$service.json"

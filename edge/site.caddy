@@ -1,0 +1,13 @@
+# Add this site to the EXISTING shared edge configuration after approval.
+# No other site or global block is replaced. The edge owns certificate issuance.
+assemblyos.uz {
+    tls {
+        issuer acme {
+            disable_tlsalpn_challenge
+        }
+    }
+    reverse_proxy assembly-os-proxy:8080 {
+        header_up X-Forwarded-Proto https
+        header_up X-Assembly-Client-IP {client_ip}
+    }
+}

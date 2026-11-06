@@ -1,0 +1,22 @@
+rules:
+  - id: project-must-not-reconfigure-host
+    languages: [generic]
+    severity: ERROR
+    message: Project deployment must preserve the provisioned host and shared services.
+    pattern-regex: '(?m)^\s*(?:apt(?:-get)?\s|ufw\s|usermod\s|groupadd\s|sshd\s|systemctl\s+(?:restart|stop|reload)\s+(?:docker|ssh|postgres)|docker\s+(?:system|volume|network)\s+prune)'
+    paths:
+      include: ["**/scripts/*.sh"]
+  - id: project-must-not-provision-or-dump-cluster
+    languages: [generic]
+    severity: ERROR
+    message: Use the dedicated application role and a single database; no cluster operations.
+    pattern-regex: '(?i)\b(?:pg_dumpall|createdb|createuser)\b|\bCREATE\s+(?:DATABASE|ROLE|USER)\b|\bPOSTGRES_PASSWORD\b'
+    paths:
+      include: ["**/scripts/*.sh", "**/scripts/*.py"]
+  - id: project-must-not-start-postgres
+    languages: [generic]
+    severity: ERROR
+    message: Shared PostgreSQL lifecycle belongs to the host operator.
+    pattern-regex: '(?m)compose\[@\].*\b(?:up|restart|stop|rm)\b.*\bpostgres\b'
+    paths:
+      include: ["**/scripts/*.sh"]

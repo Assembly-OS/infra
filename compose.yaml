@@ -17,43 +17,16 @@ x-service-defaults: &service-defaults
     - app
 
 services:
-  postgres:
-    <<: *service-defaults
-    image: postgres:17-alpine
-    # The alpine image's server account is uid/gid 70. The entrypoint would
-    # normally start as root and drop to it, but that needs CAP_SETUID, which
-    # service-defaults takes away; starting as the account directly keeps the
-    # capability set empty and still lets initdb resolve its own user.
-    user: "70:70"
-    env_file:
-      - /etc/assembly-os/postgres.env
-    volumes:
-      - /var/lib/assembly-os/pgdata:/var/lib/postgresql/data
-    tmpfs:
-      # A read-only root leaves the server nowhere to put its unix socket.
-      - /run/postgresql:rw,noexec,nosuid,nodev,size=16m,uid=70,gid=70
-      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=70,gid=70
-    # SIGTERM means "smart shutdown" to Postgres: wait for every client to
-    # leave. Compose would kill it ten seconds later and the cluster would
-    # replay its log on the next boot. SIGINT is the fast, clean stop.
-    stop_signal: SIGINT
-    stop_grace_period: 30s
-    healthcheck:
-      test: [CMD-SHELL, 'pg_isready -q -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
-      interval: 15s
-      timeout: 5s
-      start_period: 30s
-      retries: 5
-
-  backend:
+  assembly-os-backend:
     <<: *service-defaults
     image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
     user: "10001:10001"
     env_file:
       - /etc/assembly-os/backend.env
-    depends_on:
-      postgres:
-        condition: service_healthy
+    networks:
+      app:
+        aliases: [backend]
+      database: {}
     volumes:
       - /var/lib/assembly-os/data:/data
       - /var/lib/assembly-os/models:/models:ro
@@ -67,16 +40,18 @@ services:
       start_period: 30s
       retries: 5
 
-  frontend:
+  assembly-os-frontend:
     <<: *service-defaults
     image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE is required}
     user: "10001:10001"
+    networks:
+      app:
+        aliases: [frontend]
+      database: {}
     env_file:
       - /etc/assembly-os/frontend.env
     depends_on:
-      backend:
-        condition: service_healthy
-      postgres:
+      assembly-os-backend:
         condition: service_healthy
     volumes:
       - /var/lib/assembly-os/data:/data
@@ -97,7 +72,7 @@ services:
     env_file:
       - /etc/assembly-os/bot.env
     depends_on:
-      backend:
+      assembly-os-backend:
         condition: service_healthy
     volumes:
       - /var/lib/assembly-os/data:/data
@@ -110,23 +85,21 @@ services:
       start_period: 20s
       retries: 5
 
-  caddy:
+  assembly-os-proxy:
     <<: *service-defaults
     image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     user: "10001:10001"
-    cap_add:
-      - NET_BIND_SERVICE
+    networks:
+      app: {}
+      ingress:
+        aliases: [assembly-os-proxy]
     env_file:
       - /etc/assembly-os/caddy.env
     depends_on:
-      backend:
+      assembly-os-backend:
         condition: service_healthy
-      frontend:
+      assembly-os-frontend:
         condition: service_healthy
-    ports:
-      - 80:80
-      - 443:443
-      - 443:443/udp
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /var/lib/assembly-os/caddy/data:/data
@@ -134,7 +107,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001
     healthcheck:
-      test: [CMD, caddy, version]
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -142,3 +115,9 @@ services:
 networks:
   app:
     driver: bridge
+  database:
+    external: true
+    name: ${DB_NETWORK:?DB_NETWORK is required}
+  ingress:
+    external: true
+    name: ${INGRESS_NETWORK:?INGRESS_NETWORK is required}

@@ -4,105 +4,31 @@ umask 022
 
 deploy_root="${1:-/opt/assembly-os}"
 ssh_port="${2:-22}"
-perform_upgrade="${3:-true}"
+perform_upgrade="${3:-false}"
 source_root="${4:-}"
 backup_retention="${5:-14}"
 
 [[ "$(id -u)" -eq 0 ]] || { echo "Bootstrap must run as root" >&2; exit 2; }
-[[ "$deploy_root" == /opt/* && "$deploy_root" != /opt ]] || { echo "DEPLOY_ROOT must be below /opt" >&2; exit 2; }
-[[ "$ssh_port" =~ ^[0-9]+$ ]] && (( ssh_port >= 1 && ssh_port <= 65535 )) || { echo "Invalid SSH port" >&2; exit 2; }
+[[ "$deploy_root" == /opt/assembly-os ]] || { echo "DEPLOY_ROOT must be below /opt" >&2; exit 2; }
+if ! [[ "$ssh_port" =~ ^[0-9]+$ ]] || (( ssh_port < 1 || ssh_port > 65535 )); then echo "Invalid SSH port" >&2; exit 2; fi
 [[ "$perform_upgrade" == true || "$perform_upgrade" == false ]] || { echo "Invalid upgrade flag" >&2; exit 2; }
-[[ "$backup_retention" =~ ^[0-9]+$ ]] && (( backup_retention >= 1 && backup_retention <= 365 )) || { echo "Invalid backup retention" >&2; exit 2; }
+if ! [[ "$backup_retention" =~ ^[0-9]+$ ]] || (( backup_retention < 1 || backup_retention > 365 )); then echo "Invalid backup retention" >&2; exit 2; fi
 [[ -d "$source_root" && -f "$source_root/models/checksums.tsv" ]] || { echo "Bootstrap source bundle is incomplete" >&2; exit 2; }
 
-source /etc/os-release
-[[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 26.04 ]] || {
-  echo "Ubuntu 26.04 is required; found ${PRETTY_NAME:-unknown}" >&2
-  exit 2
-}
-[[ "$(dpkg --print-architecture)" == amd64 ]] || { echo "amd64 is required" >&2; exit 2; }
-
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-if [[ "$perform_upgrade" == true ]]; then
-  apt-get -y full-upgrade
-fi
-apt-get install -y --no-install-recommends \
-  ca-certificates curl fail2ban gnupg jq rsync sqlite3 tar ufw unattended-upgrades xz-utils
-
-install -d -m 0755 /etc/apt/keyrings
-if [[ ! -s /etc/apt/keyrings/docker.asc ]]; then
-  curl --proto '=https' --tlsv1.2 -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    -o /etc/apt/keyrings/docker.asc
-fi
-chmod 0644 /etc/apt/keyrings/docker.asc
-cat > /etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: ${VERSION_CODENAME}
-Components: stable
-Architectures: amd64
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
-apt-get update
-apt-get install -y --no-install-recommends \
-  containerd.io docker-buildx-plugin docker-ce docker-ce-cli docker-compose-plugin
-
-install -d -m 0755 /etc/docker
-daemon_tmp="$(mktemp)"
-if [[ -s /etc/docker/daemon.json ]]; then
-  jq '. + {"live-restore": true, "no-new-privileges": true, "log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}' \
-    /etc/docker/daemon.json > "$daemon_tmp"
-else
-  jq -n '{"live-restore": true, "no-new-privileges": true, "log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}' > "$daemon_tmp"
-fi
-install -o root -g root -m 0644 "$daemon_tmp" /etc/docker/daemon.json
-rm -f "$daemon_tmp"
-systemctl enable --now docker
-systemctl restart docker
+# This host is already provisioned. Missing prerequisites are an operator task.
+for command in docker python3 rsync curl tar flock; do
+  command -v "$command" >/dev/null || { echo "Missing prerequisite: $command" >&2; exit 2; }
+done
 docker info >/dev/null
-docker buildx version
-docker compose version
-
-install -d -m 0755 /etc/ssh/sshd_config.d
-cat > /etc/ssh/sshd_config.d/60-assembly-os.conf <<EOF
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-PubkeyAuthentication yes
-PermitRootLogin prohibit-password
-X11Forwarding no
-AllowAgentForwarding no
-EOF
-sshd -t
-systemctl reload ssh
-
-cat > /etc/fail2ban/jail.d/assembly-os-sshd.local <<EOF
-[sshd]
-enabled = true
-port = ${ssh_port}
-backend = systemd
-maxretry = 5
-bantime = 1h
-EOF
-systemctl enable --now fail2ban
-systemctl restart fail2ban
-
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow "${ssh_port}/tcp" comment 'SSH'
-ufw allow 80/tcp comment 'HTTP for ACME redirect'
-ufw allow 443/tcp comment 'HTTPS'
-ufw allow 443/udp comment 'HTTP/3'
-ufw --force enable
-
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-systemctl enable --now unattended-upgrades
-
-install -d -o root -g root -m 0755 "$deploy_root" "$deploy_root/current" "$deploy_root/releases" "$deploy_root/.staging"
+docker compose version >/dev/null
+python3 "$source_root/scripts/project-db.py" check --config "$source_root/config/database.json"
+[[ "$perform_upgrade" == false ]] || { echo "Host upgrades are prohibited by this bootstrap" >&2; exit 2; }
+deploy_user="${6:-deploy}"
+[[ "$deploy_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 2
+id "$deploy_user" >/dev/null
+deploy_group="$(id -gn "$deploy_user")"
+install -d -o root -g root -m 0755 "$deploy_root" "$deploy_root/current" "$deploy_root/releases"
+install -d -o "$deploy_user" -g "$deploy_group" -m 0700 "$deploy_root/.staging"
 install -d -o root -g root -m 0700 /etc/assembly-os /var/backups/assembly-os
 install -d -o root -g root -m 0700 /var/backups/assembly-os/scheduled /var/backups/assembly-os/predeploy /var/backups/assembly-os/manual
 install -d -m 0750 /var/lib/assembly-os/data /var/lib/assembly-os/data/uploads
@@ -115,6 +41,12 @@ printf '%s\n' "$deploy_root" > /etc/assembly-os/deploy-root
 chmod 0600 /etc/assembly-os/deploy-root
 printf "BACKUP_RETENTION_DAYS='%s'\n" "$backup_retention" > /etc/assembly-os/backup.env
 chmod 0600 /etc/assembly-os/backup.env
+# Install project configuration only; no shared infrastructure credentials are needed.
+for file in backend.env frontend.env bot.env caddy.env backup.env compose.env database.json; do
+  if [[ "$file" == bot.env && -f /etc/assembly-os/bot.env ]]; then continue; fi
+  install -o root -g root -m 0600 "$source_root/config/$file" "/etc/assembly-os/$file"
+done
+
 
 while read -r checksum filename url; do
   [[ -z "$checksum" || "$checksum" == \#* ]] && continue
@@ -135,11 +67,17 @@ while read -r checksum filename url; do
   rm -f -- "$temporary"
 done < "$source_root/models/checksums.tsv"
 
+install -o root -g root -m 0755 "$source_root/scripts/project-db.py" /usr/local/sbin/assembly-os-project-db
 install -o root -g root -m 0755 "$source_root/scripts/backup.sh" /usr/local/sbin/assembly-os-backup
+install -o root -g root -m 0755 "$source_root/scripts/restore-media.py" /usr/local/sbin/assembly-os-restore-media
 install -o root -g root -m 0755 "$source_root/scripts/restore.sh" /usr/local/sbin/assembly-os-restore
 install -o root -g root -m 0644 "$source_root/systemd/assembly-os-backup.service" /etc/systemd/system/assembly-os-backup.service
 install -o root -g root -m 0644 "$source_root/systemd/assembly-os-backup.timer" /etc/systemd/system/assembly-os-backup.timer
 systemctl daemon-reload
-systemctl enable --now assembly-os-backup.timer
+# Enabled only after the approved restore and verification.
+if [[ -f /var/lib/assembly-os/restore-verified ]]; then
+  python3 "$source_root/scripts/project-db.py" check --require-restored
+  systemctl enable --now assembly-os-backup.timer
+fi
 
-echo "Bootstrap complete. Reboot required: $([[ -f /var/run/reboot-required ]] && echo yes || echo no)"
+echo "Project storage and maintenance prepared; host services were not changed."

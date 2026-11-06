@@ -17,13 +17,14 @@ permissions:
 
 jobs:
   deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' && vars.DEPLOY_ENABLED == 'true' }}
     name: Deploy ${{ inputs.service }}
     runs-on: ubuntu-24.04
-    environment: production
+    environment: prod
     env:
       SERVICE: ${{ inputs.service }}
       VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_USERNAME: ${{ vars.VPS_USERNAME || 'root' }}
+      VPS_USERNAME: ${{ vars.VPS_USERNAME || 'deploy' }}
       VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
       DEPLOY_ROOT: ${{ vars.DEPLOY_ROOT || '/opt/assembly-os' }}
       GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
@@ -38,10 +39,10 @@ jobs:
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
           [[ "$SERVICE" =~ ^(backend|frontend|bot)$ ]]
-          [[ "$VPS_USERNAME" == root ]]
+          [[ "$VPS_USERNAME" =~ ^[a-z_][a-z0-9_-]*$ && "$VPS_USERNAME" != root ]]
           [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$VPS_SSH_PORT" =~ ^[0-9]+$ ]] && (( VPS_SSH_PORT >= 1 && VPS_SSH_PORT <= 65535 ))
-          [[ "$DEPLOY_ROOT" =~ ^/opt/[A-Za-z0-9._/-]+$ ]]
+          [[ "$DEPLOY_ROOT" == /opt/assembly-os ]]
           [[ "$GHCR_USERNAME" =~ ^[A-Za-z0-9-]+$ ]]
           [[ "$BACKUP_RETENTION_DAYS" =~ ^[0-9]+$ ]]
           case "$SERVICE" in
@@ -56,6 +57,13 @@ jobs:
       - name: Render root-readable runtime configuration
         shell: bash
         env:
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_PORT: ${{ vars.DB_PORT }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NETWORK: ${{ vars.DB_NETWORK }}
+          INGRESS_NETWORK: ${{ vars.INGRESS_NETWORK }}
           AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -108,11 +116,11 @@ jobs:
           remote="$VPS_USERNAME@$VPS_HOST"
           remote_stage="$DEPLOY_ROOT/.staging/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SERVICE}"
           # shellcheck disable=SC2029
-          ssh "${ssh_args[@]}" "$remote" "install -d -o root -g root -m 0700 '$remote_stage/repo' '$remote_stage/config' '$remote_stage/secrets'"
+          ssh "${ssh_args[@]}" "$remote" "sudo -n install -d -o '$VPS_USERNAME' -m 0700 '$remote_stage/repo' '$remote_stage/config' '$remote_stage/secrets'"
           # shellcheck disable=SC2329
           cleanup_remote() {
             # shellcheck disable=SC2029
-            ssh "${ssh_args[@]}" "$remote" "rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
+            ssh "${ssh_args[@]}" "$remote" "sudo -n rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
           }
           trap cleanup_remote EXIT
           rsync_ssh="ssh -i $SSH_KEY -p $VPS_SSH_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
@@ -127,26 +135,6 @@ jobs:
           rsync -az -e "$rsync_ssh" "$RUNNER_TEMP/ghcr-token" "$remote:$remote_stage/secrets/ghcr-token"
           backup_id="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          set +e
           # shellcheck disable=SC2029
           ssh "${ssh_args[@]}" "$remote" \
-            "bash '$remote_stage/repo/scripts/deploy.sh' '$SERVICE' '$remote_stage' '$DEPLOY_ROOT' '$GITHUB_SHA' '$run_url' '$GHCR_USERNAME' '$backup_id'"
-          deploy_status=$?
-          set -e
-          # shellcheck disable=SC2029
-          if [[ "$SERVICE" == backend ]] && ssh "${ssh_args[@]}" "$remote" "test -d '/var/backups/assembly-os/predeploy/$backup_id'"; then
-            mkdir -p "$RUNNER_TEMP/predeploy-backup"
-            rsync -az -e "$rsync_ssh" "$remote:/var/backups/assembly-os/predeploy/$backup_id/" "$RUNNER_TEMP/predeploy-backup/"
-            echo "backup=true" >> "$GITHUB_OUTPUT"
-          fi
-          exit "$deploy_status"
-
-      - name: Upload the predeploy backup
-        if: ${{ always() && inputs.service == 'backend' && steps.remote.outputs.backup == 'true' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: predeploy-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/predeploy-backup
-          if-no-files-found: error
-          retention-days: ${{ fromJSON(vars.BACKUP_RETENTION_DAYS || '14') }}
-          compression-level: 6
+            "sudo -n bash '$remote_stage/repo/scripts/deploy.sh' '$SERVICE' '$remote_stage' '$DEPLOY_ROOT' '$GITHUB_SHA' '$run_url' '$GHCR_USERNAME' '$backup_id'"

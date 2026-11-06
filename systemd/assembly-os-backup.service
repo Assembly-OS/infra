@@ -1,5 +1,5 @@
 [Unit]
-Description=Assembly OS consistent SQLite and uploads backup
+Description=Assembly OS project PostgreSQL, legacy SQLite and uploads backup
 After=local-fs.target
 
 [Service]
