@@ -49,3 +49,7 @@ Follow-up verification passed: 9 runtime/restore tests, actionlint with ShellChe
 ## Approved production-data restoration
 
 The separately approved final export, transfer, project-only restore and data comparison completed on 2026-11-07 at 02:08 Asia/Tashkent. All 35 tables/835 rows, 28 sequences, schema definitions, 52 uploads and the legacy SQLite file match. A fresh target backup passed validation. See CUTOVER_STATUS.md for evidence, retained recovery paths, service state and the still-pending deployment approval.
+
+## Caddy execution fix
+
+The first backend deployment failed before backend startup: the pinned Caddy binary has file capability cap_net_bind_service=ep and could not execute with an empty capability bounding set. The same tini Operation not permitted error was reproduced locally. Restoring only NET_BIND_SERVICE to the internal proxy service allowed both caddy version and caddy validate to pass with non-root UID/GID 10001, read-only root, all other capabilities dropped and no-new-privileges retained. CI Caddy validation now uses those restrictions too. No production deployment was rerun as part of this fix.

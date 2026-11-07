@@ -32,8 +32,8 @@ jobs:
       - name: Internal and shared-edge Caddy syntax
         run: |
           image='caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d'
-          docker run --rm --entrypoint caddy -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" validate --config /etc/caddy/Caddyfile
-          docker run --rm --entrypoint caddy -v "$PWD/edge/site.caddy:/etc/caddy/Caddyfile:ro" "$image" adapt --validate --config /etc/caddy/Caddyfile >/dev/null
+          docker run --rm --init --user 10001:10001 --read-only --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges:true --entrypoint caddy -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" validate --config /etc/caddy/Caddyfile
+          docker run --rm --init --user 10001:10001 --read-only --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges:true --entrypoint caddy -v "$PWD/edge/site.caddy:/etc/caddy/Caddyfile:ro" "$image" adapt --validate --config /etc/caddy/Caddyfile >/dev/null
       - name: Deployment security rules
         run: |
           docker run --rm -v "$PWD:/work:ro" -w /work semgrep/semgrep:1.179.0 \
