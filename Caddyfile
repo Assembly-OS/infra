@@ -7,13 +7,13 @@ http://:8080 {
     respond /healthz "ok" 200
     encode zstd gzip
     @api path /api/*
-    reverse_proxy @api backend:3000 {
+    reverse_proxy @api assembly-os-backend:3000 {
         header_up X-Forwarded-Proto https
         header_up X-Forwarded-For {http.request.header.X-Assembly-Client-IP}
         header_up X-Real-IP {http.request.header.X-Assembly-Client-IP}
         header_up -X-Assembly-Client-IP
     }
-    reverse_proxy frontend:3000 {
+    reverse_proxy assembly-os-frontend:3000 {
         header_up X-Forwarded-Proto https
         header_up X-Forwarded-For {http.request.header.X-Assembly-Client-IP}
         header_up X-Real-IP {http.request.header.X-Assembly-Client-IP}

@@ -145,7 +145,9 @@ running_image="$(docker inspect --format '{{.Config.Image}}' "$running_id")"
 
 "${compose[@]}" up -d --no-deps assembly-os-proxy
 wait_healthy assembly-os-proxy || { echo "Caddy failed its health check" >&2; exit 1; }
-"${compose[@]}" exec -T assembly-os-proxy caddy reload --config /etc/caddy/Caddyfile
+# A previous rsync can replace the host file inode while an existing container
+# still bind-mounts the old inode. Reload the current source through stdin.
+"${compose[@]}" exec -T assembly-os-proxy caddy reload --config /dev/stdin --adapter caddyfile < "$deploy_root/current/Caddyfile"
 
 timestamp="$(date -u +%FT%TZ)"
 record="/var/lib/assembly-os/deployments/$service.json"

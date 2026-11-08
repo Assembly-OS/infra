@@ -34,3 +34,11 @@ Checksums passed before transfer, after local transfer and after target transfer
 Old Assembly backend, frontend and bot are stopped. Old PostgreSQL and Caddy remain healthy. No Assembly application containers have been started on the new host. Both project backup timers remain inactive during maintenance. Assembly is unavailable while awaiting cutover; do not restart old writers or run both bots.
 
 Next requires approval: start the new backend (including its existing startup schema/legacy-import hook), deploy frontend, integrate the prepared Assembly site into the existing shared edge, issue/verify origin TLS, switch DNS, and start the new bot. Keep deployment disabled until that approval. Verify a new-host backup and enable only this project's backup timer before reopening public writes. Follow MIGRATION.md for ordering and rollback constraints.
+
+## Direct-DNS HTTPS activation — 2026-11-08
+
+The owner pointed assemblyos.uz directly to 65.108.142.153 and authorized Caddy certificate issuance. The shared edge now serves the Assembly site through its existing ingress network, using the prepared site block; no other site/global block or certificate storage was replaced. Its pre-change configuration and health snapshots are retained under `/var/backups/assembly-os/edge/20261108T184510Z`.
+
+A trusted Let's Encrypt YE1 certificate covers assemblyos.uz, valid from 2026-11-08 17:46:45 UTC until 2027-02-06 17:46:44 UTC. Certificate verification was performed without insecure flags. Direct-origin and public API health returned HTTP 200 with `{"ok":true}`; the public homepage returned HTTP 200. Existing-site response/TLS checks were unchanged before/after the shared reload.
+
+The internal proxy's generic backend/frontend names collided with another application's ingress aliases. Its upstreams now use assembly-os-backend and assembly-os-frontend. A stale file bind mount was discovered; feeding the current Caddyfile to reload via stdin corrected the running configuration without container restarts. Deployment now uses this reload method too. Database/app containers were not restarted or migrated for TLS activation. The bot was not started as part of this operation.
